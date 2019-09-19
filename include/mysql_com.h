@@ -82,7 +82,7 @@
   Length of random string sent by server on handshake; this is also length of
   obfuscated password, received from client
 */
-#define SCRAMBLE_LENGTH 20
+#define SCRAMBLE_LENGTH 32
 #define AUTH_PLUGIN_DATA_PART_1_LENGTH 8
 /* length of password stored in the db: new passwords are preceeded with '*' */
 #define SCRAMBLED_PASSWORD_CHAR_LENGTH (SCRAMBLE_LENGTH*2+1)

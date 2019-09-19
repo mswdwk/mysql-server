@@ -67,6 +67,7 @@
 #include <my_rnd.h>
 #include "mysql.h"
 #include "crypt_genhash_impl.h"
+#include <sm3.h>
 
 void randominit(struct rand_struct *rand_st, ulong seed1, ulong seed2)
 {                                               /* For mysql 3.21.# */
@@ -222,6 +223,16 @@ void compute_two_stage_sha1_hash(const char *password, size_t pass_len,
   compute_sha1_hash(hash_stage2, (const char *) hash_stage1, SHA1_HASH_SIZE);
 }
 
+inline static
+void compute_two_stage_sm3_hash(const char *password, size_t pass_len,
+                                 uint8 *hash_stage1, uint8 *hash_stage2)
+{
+  /* Stage 1: hash password */
+  compute_sm3_hash(hash_stage1, (unsigned char*)password, pass_len);
+
+  /* Stage 2 : hash first stage's output. */
+  compute_sm3_hash(hash_stage2, (unsigned char *) hash_stage1, SM3_HASH_SIZE);
+}
 
 /*
     MySQL 4.1.1 password hashing: SHA conversion (see RFC 2289, 3174) twice
@@ -249,6 +260,18 @@ void my_make_scrambled_password_sha1(char *to, const char *password,
   octet2hex(to, (const char*) hash_stage2, SHA1_HASH_SIZE);
 }
   
+void my_make_scrambled_password_sm3(char *to, const char *password,
+                                     size_t pass_len)
+{
+  uint8 hash_stage2[SM3_HASH_SIZE];
+
+  /* Two stage SM3 hash of the password. */
+  compute_two_stage_sm3_hash(password, pass_len, (uint8 *) to, hash_stage2);
+
+  /* convert hash_stage2 to hex string */
+  *to++= PVERSION41_CHAR;
+  octet2hex(to, (const char*) hash_stage2, SM3_HASH_SIZE);
+}
 
 /*
   Wrapper around my_make_scrambled_password() to maintain client lib ABI
@@ -263,7 +286,8 @@ void my_make_scrambled_password_sha1(char *to, const char *password,
 
 void make_scrambled_password(char *to, const char *password)
 {
-  my_make_scrambled_password_sha1(to, password, strlen(password));
+  // my_make_scrambled_password_sha1(to, password, strlen(password));
+  my_make_scrambled_password_sm3(to, password, strlen(password));
 }
 
 
@@ -285,7 +309,7 @@ void make_scrambled_password(char *to, const char *password)
 */
 
 void
-scramble(char *to, const char *message, const char *password)
+scramble_sha1(char *to, const char *message, const char *password)
 {
   uint8 hash_stage1[SHA1_HASH_SIZE];
   uint8 hash_stage2[SHA1_HASH_SIZE];
@@ -300,7 +324,28 @@ scramble(char *to, const char *message, const char *password)
   my_crypt(to, (const uchar *) to, hash_stage1, SCRAMBLE_LENGTH);
 }
 
+void
+scramble_sm3(char *to, const char *message, const char *password)
+{
+  uint8 hash_stage1[SM3_HASH_SIZE];
+  uint8 hash_stage2[SM3_HASH_SIZE];
 
+  /* Two stage SM3 hash of the password. */
+  compute_two_stage_sm3_hash(password, strlen(password), hash_stage1,
+                              hash_stage2);
+
+  /* create crypt string as sm3(message, hash_stage2) */;
+  compute_sm3_hash_multi((uint8 *) to, (unsigned char*)message, SCRAMBLE_LENGTH,
+                          (unsigned char *) hash_stage2, SM3_HASH_SIZE);
+  my_crypt(to, (const uchar *) to, hash_stage1, SCRAMBLE_LENGTH);
+}
+
+void
+scramble(char *to, const char *message, const char *password)
+{
+ // scramble_sha1(to,message,password);
+ scramble_sm3(to,message,password);
+}
 /*
     Check that scrambled message corresponds to the password; the function
     is used by server to check that received reply is authentic.
@@ -341,10 +386,30 @@ check_scramble_sha1(const uchar *scramble_arg, const char *message,
 }
 
 my_bool
+check_scramble_sm3(const uchar *scramble_arg, const char *message,
+                    const uint8 *hash_stage2)
+{
+  uint8 buf[SM3_HASH_SIZE];
+  uint8 hash_stage2_reassured[SM3_HASH_SIZE];
+
+  /* create key to encrypt scramble */
+  compute_sm3_hash_multi(buf, (unsigned char*)message, SCRAMBLE_LENGTH,
+                          (unsigned char *) hash_stage2, SM3_HASH_SIZE);
+  /* encrypt scramble */
+  my_crypt((char *) buf, buf, scramble_arg, SCRAMBLE_LENGTH);
+
+  /* now buf supposedly contains hash_stage1: so we can get hash_stage2 */
+  compute_sm3_hash(hash_stage2_reassured, (unsigned char *) buf, SM3_HASH_SIZE);
+
+  return MY_TEST(memcmp(hash_stage2, hash_stage2_reassured, SM3_HASH_SIZE));
+}
+
+my_bool
 check_scramble(const uchar *scramble_arg, const char *message,
                const uint8 *hash_stage2)
 {
-  return check_scramble_sha1(scramble_arg, message, hash_stage2);
+  // return check_scramble_sha1(scramble_arg, message, hash_stage2);
+  return check_scramble_sm3(scramble_arg, message, hash_stage2);
 }
 
 /*
@@ -359,7 +424,8 @@ check_scramble(const uchar *scramble_arg, const char *message,
     
 void get_salt_from_password(uint8 *hash_stage2, const char *password)
 {
-  hex2octet(hash_stage2, password+1 /* skip '*' */, SHA1_HASH_SIZE * 2);
+  // hex2octet(hash_stage2, password+1 /* skip '*' */, SHA1_HASH_SIZE * 2);
+   hex2octet(hash_stage2, password+1 /* skip '*' */, SM3_HASH_SIZE * 2);
 }
 
 /*

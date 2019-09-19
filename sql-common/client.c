@@ -6208,8 +6208,10 @@ static int native_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
   if (mysql->passwd[0])
   {
     char scrambled[SCRAMBLE_LENGTH + 1];
-    DBUG_PRINT("info", ("sending scramble"));
+    DBUG_PRINT("info", ("sending scramble pkt=%s",pkt));
+    DBUG_PRINT("info", ("sending scramble passwd=%s",mysql->passwd));
     scramble(scrambled, (char*)pkt, mysql->passwd);
+    DBUG_PRINT("info", ("sending scramble=%s",scrambled));
     if (vio->write_packet(vio, (uchar*)scrambled, SCRAMBLE_LENGTH))
       DBUG_RETURN(CR_ERROR);
   }

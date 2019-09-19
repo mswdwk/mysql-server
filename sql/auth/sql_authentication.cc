@@ -2593,7 +2593,8 @@ int generate_native_password(char *outbuf, unsigned int *buflen,
                                  MYF(0));
   if (buffer == NULL)
     return 1;
-  my_make_scrambled_password_sha1(buffer, inbuf, inbuflen);
+  // my_make_scrambled_password_sha1(buffer, inbuf, inbuflen);
+  my_make_scrambled_password_sm3(buffer, inbuf, inbuflen);
   /*
     if buffer specified by server is smaller than the buffer given
     by plugin then return error
@@ -2781,7 +2782,7 @@ static int native_password_authenticate(MYSQL_PLUGIN_VIO *vio,
   {
     if (!mpvio->acl_user->salt_len)
       DBUG_RETURN(CR_AUTH_USER_CREDENTIALS);
-
+     DBUG_PRINT("info", ("mpvio_scramble pkt=%s  scram=%s salt=%s len=%d",pkt,mpvio->scramble,mpvio->acl_user->salt,mpvio->acl_user->salt_len));
     DBUG_RETURN(check_scramble(pkt, mpvio->scramble, mpvio->acl_user->salt) ?
                 CR_AUTH_USER_CREDENTIALS : CR_OK);
   }
