@@ -3118,5 +3118,7 @@ client/mysql_install_db
 internal/tests/open_files_limit
 client/mysql_ssl_rsa_setup
 
+.idea
+git-mysql5720.si4project
 # Allow
 !include/*/boost/geometry/*
