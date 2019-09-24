@@ -452,7 +452,7 @@ typedef struct st_mysql
   enum mysql_status status;
   my_bool free_me;
   my_bool reconnect;
-  char scramble[20 +1];
+  char scramble[32 +1]; 
   my_bool unused1;
   void *unused2, *unused3, *unused4, *unused5;
   LIST *stmts;
