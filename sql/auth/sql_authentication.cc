@@ -60,6 +60,10 @@
 LEX_CSTRING native_password_plugin_name= {
   C_STRING_WITH_LEN("mysql_native_password")
 };
+
+LEX_CSTRING sm3_password_plugin_name= {
+  C_STRING_WITH_LEN("mysql_sm3_password")
+};
   
 LEX_CSTRING sha256_password_plugin_name= {
   C_STRING_WITH_LEN("sha256_password")
@@ -2611,6 +2615,38 @@ int generate_native_password(char *outbuf, unsigned int *buflen,
   return 0;
 }
 
+ int generate_sm3_password(char *outbuf, unsigned int *buflen,
+                              const char *inbuf, unsigned int inbuflen)
+ {
+   if (my_validate_password_policy(inbuf, inbuflen))
+     return 1;
+   /* for empty passwords */
+   if (inbuflen == 0)
+   {
+     *buflen= 0;
+     return 0;
+   }
+   char *buffer= (char*)my_malloc(PSI_NOT_INSTRUMENTED,
+                                  SM3_SCRAMBLED_PASSWORD_CHAR_LENGTH+1,
+                                  MYF(0));
+   if (buffer == NULL)
+     return 1;
+   my_make_scrambled_password_sm3(buffer, inbuf, inbuflen);
+   /*
+     if buffer specified by server is smaller than the buffer given
+     by plugin then return error
+   */
+   if (*buflen < strlen(buffer))
+   {
+     my_free(buffer);
+     return 1;
+   }
+   *buflen= SM3_SCRAMBLED_PASSWORD_CHAR_LENGTH;
+   memcpy(outbuf, buffer, *buflen);
+   my_free(buffer);
+   return 0;
+ }
+
 int validate_native_password_hash(char* const inbuf, unsigned int buflen)
 {
   /* empty password is also valid */
@@ -2619,6 +2655,16 @@ int validate_native_password_hash(char* const inbuf, unsigned int buflen)
       buflen == 0)
     return 0;
   return 1;
+}
+
+int validate_sm3_password_hash(char* const inbuf, unsigned int buflen)
+{
+    /* empty password is also valid */
+    if ((buflen &&
+         buflen == SM3_SCRAMBLED_PASSWORD_CHAR_LENGTH && inbuf[0] == '*') ||
+        buflen == 0)
+        return 0;
+    return 1;
 }
 
 int set_native_salt(const char* password, unsigned int password_len,
@@ -2637,6 +2683,24 @@ int set_native_salt(const char* password, unsigned int password_len,
   }
   return 0;
 }
+
+int set_sm3_salt(const char* password, unsigned int password_len,
+                    unsigned char* salt, unsigned char *salt_len)
+{
+  /* for empty passwords salt_len is 0 */
+  if (password_len == 0)
+    *salt_len= 0;
+  else
+  {
+    if (password_len == SM3_SCRAMBLED_PASSWORD_CHAR_LENGTH)
+    {
+      sm3_get_salt_from_password(salt, password);
+      *salt_len= SM3_SCRAMBLE_LENGTH;
+    }
+  }
+  return 0;
+}
+
 
 #if defined(HAVE_OPENSSL)
 int generate_sha256_password(char *outbuf, unsigned int *buflen,
@@ -2786,6 +2850,98 @@ static int native_password_authenticate(MYSQL_PLUGIN_VIO *vio,
       DBUG_RETURN(CR_AUTH_USER_CREDENTIALS);
 
     DBUG_RETURN(check_scramble(pkt, mpvio->scramble, mpvio->acl_user->salt) ?
+                CR_AUTH_USER_CREDENTIALS : CR_OK);
+  }
+
+  my_error(ER_HANDSHAKE_ERROR, MYF(0));
+  DBUG_RETURN(CR_AUTH_HANDSHAKE);
+}
+
+static int sm3_password_authenticate(MYSQL_PLUGIN_VIO *vio,
+                                        MYSQL_SERVER_AUTH_INFO *info)
+{
+  uchar *pkt;
+  int pkt_len;
+  MPVIO_EXT *mpvio= (MPVIO_EXT *) vio;
+
+  DBUG_ENTER("sm3_password_authenticate");
+  // uchar scramble_tmp[SM3_SCRAMBLE_LENGTH + 1] = {0};
+  /* generate the scramble, or reuse the old one */
+  //if (mpvio->scramble[SCRAMBLE_LENGTH])
+    generate_user_salt(mpvio->scramble, SM3_SCRAMBLE_LENGTH + 1);
+
+  /* send it to the client */
+  if (mpvio->write_packet(mpvio, (uchar*)mpvio->scramble, SM3_SCRAMBLE_LENGTH + 1))
+    DBUG_RETURN(CR_AUTH_HANDSHAKE);
+
+  /* reply and authenticate */
+
+  /*
+    <digression>
+      This is more complex than it looks.
+
+      The plugin (we) may be called right after the client was connected -
+      and will need to send a scramble, read reply, authenticate.
+
+      Or the plugin may be called after another plugin has sent a scramble,
+      and read the reply. If the client has used the correct client-plugin,
+      we won't need to read anything here from the client, the client
+      has already sent a reply with everything we need for authentication.
+
+      Or the plugin may be called after another plugin has sent a scramble,
+      and read the reply, but the client has used the wrong client-plugin.
+      We'll need to sent a "switch to another plugin" packet to the
+      client and read the reply. "Use the short scramble" packet is a special
+      case of "switch to another plugin" packet.
+
+      Or, perhaps, the plugin may be called after another plugin has
+      done the handshake but did not send a useful scramble. We'll need
+      to send a scramble (and perhaps a "switch to another plugin" packet)
+      and read the reply.
+
+      Besides, a client may be an old one, that doesn't understand plugins.
+      Or doesn't even understand 4.0 scramble.
+
+      And we want to keep the same protocol on the wire  unless non-native
+      plugins are involved.
+
+      Anyway, it still looks simple from a plugin point of view:
+      "send the scramble, read the reply and authenticate"
+      All the magic is transparently handled by the server.
+    </digression>
+  */
+
+  /* read the reply with the encrypted password */
+  if ((pkt_len= mpvio->read_packet(mpvio, &pkt)) < 0)
+    DBUG_RETURN(CR_AUTH_HANDSHAKE);
+  DBUG_PRINT("info", ("reply read : pkt_len=%d", pkt_len));
+
+#ifdef NO_EMBEDDED_ACCESS_CHECKS
+  DBUG_RETURN(CR_OK);
+#endif /* NO_EMBEDDED_ACCESS_CHECKS */
+
+  DBUG_EXECUTE_IF("sm3_password_bad_reply",
+                  {
+                    /* This should cause a HANDSHAKE ERROR */
+                    pkt_len= 12;
+                  }
+                  );
+  if (mysql_native_password_proxy_users)
+  {
+    *info->authenticated_as= PROXY_FLAG;
+    DBUG_PRINT("info", ("sm3 mysql_native_authentication_proxy_users is enabled, setting authenticated_as to NULL"));
+  }
+  if (pkt_len == 0) /* no password */
+    DBUG_RETURN(mpvio->acl_user->salt_len != 0 ?
+                CR_AUTH_USER_CREDENTIALS : CR_OK);
+
+  info->password_used= PASSWORD_USED_YES;
+  if (pkt_len == SM3_SCRAMBLE_LENGTH)
+  {
+    if (!mpvio->acl_user->salt_len)
+      DBUG_RETURN(CR_AUTH_USER_CREDENTIALS);
+
+    DBUG_RETURN(check_scramble_sm3(pkt, mpvio->scramble, mpvio->acl_user->salt) ?
                 CR_AUTH_USER_CREDENTIALS : CR_OK);
   }
 
@@ -4132,6 +4288,18 @@ static struct st_mysql_auth native_password_handler=
   AUTH_FLAG_USES_INTERNAL_STORAGE
 };
 
+static struct st_mysql_auth sm3_password_handler=
+{
+  MYSQL_AUTHENTICATION_INTERFACE_VERSION,
+  sm3_password_plugin_name.str,
+  sm3_password_authenticate,
+  generate_sm3_password,
+  validate_sm3_password_hash,
+  set_sm3_salt,
+  AUTH_FLAG_USES_INTERNAL_STORAGE
+};
+
+
 #if defined(HAVE_OPENSSL)
 static struct st_mysql_auth sha256_password_handler=
 {
@@ -4161,7 +4329,24 @@ mysql_declare_plugin(mysql_password)
   NULL,                                         /* system variables */
   NULL,                                         /* config options   */
   0,                                            /* flags            */
+},
+
+{
+  MYSQL_AUTHENTICATION_PLUGIN,                  /* type constant    */
+  &sm3_password_handler,                        /* type descriptor  */
+  sm3_password_plugin_name.str,                 /* Name             */
+    "xxx",                                      /* Author           */
+    "SM3 Native MySQL authentication",          /* Description      */
+  PLUGIN_LICENSE_GPL,                           /* License          */
+  NULL,                                         /* Init function    */
+  NULL,                                         /* Deinit function  */
+  0x0101,                                       /* Version (1.0)    */
+  NULL,                                         /* status variables */
+  NULL,                                         /* system variables */
+  NULL,                                         /* config options   */
+  0,                                            /* flags            */
 }
+
 #if defined(HAVE_OPENSSL)
 ,
 {

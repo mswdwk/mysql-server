@@ -86,7 +86,7 @@ public:
     The salt variable is used as the password hash for
     native_password_authetication.
   */
-  uint8 salt[SCRAMBLE_LENGTH + 1];       // scrambled password in binary form
+  uint8 salt[SM3_SCRAMBLE_LENGTH + 1];       // scrambled password in binary form
   /**
     In the old protocol the salt_len indicated what type of autnetication
     protocol was used: 0 - no password, 4 - 3.20, 8 - 4.0,  20 - 4.1.1

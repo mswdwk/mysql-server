@@ -183,6 +183,7 @@ my_crypt(char *to, const uchar *s1, const uchar *s2, uint len)
 }
 
 #if defined(HAVE_OPENSSL)
+// TODO: consider ssl
 void my_make_scrambled_password(char *to, const char *password,
                                 size_t pass_len)
 {
@@ -222,6 +223,17 @@ void compute_two_stage_sha1_hash(const char *password, size_t pass_len,
   compute_sha1_hash(hash_stage2, (const char *) hash_stage1, SHA1_HASH_SIZE);
 }
 
+ inline static
+ void compute_two_stage_sm3_hash(const char *password, size_t pass_len,
+                                  uint8 *hash_stage1, uint8 *hash_stage2)
+ {
+   /* Stage 1: hash password */
+   compute_sm3_hash(hash_stage1, (unsigned char*)password, pass_len);
+ 
+   /* Stage 2 : hash first stage's output. */
+   compute_sm3_hash(hash_stage2, (unsigned char *) hash_stage1, SM3_HASH_SIZE);
+ }
+
 
 /*
     MySQL 4.1.1 password hashing: SHA conversion (see RFC 2289, 3174) twice
@@ -248,6 +260,19 @@ void my_make_scrambled_password_sha1(char *to, const char *password,
   *to++= PVERSION41_CHAR;
   octet2hex(to, (const char*) hash_stage2, SHA1_HASH_SIZE);
 }
+
+ void my_make_scrambled_password_sm3(char *to, const char *password,
+                                      size_t pass_len)
+ {
+   uint8 hash_stage2[SM3_HASH_SIZE];
+ 
+   /* Two stage SM3 hash of the password. */
+   compute_two_stage_sm3_hash(password, pass_len, (uint8 *) to, hash_stage2);
+ 
+   /* convert hash_stage2 to hex string */
+   *to++= PVERSION41_CHAR;
+   octet2hex(to, (const char*) hash_stage2, SM3_HASH_SIZE);
+ }
   
 
 /*
@@ -300,6 +325,22 @@ scramble(char *to, const char *message, const char *password)
   my_crypt(to, (const uchar *) to, hash_stage1, SCRAMBLE_LENGTH);
 }
 
+void            // reply ,    salt  ,       
+scramble_sm3(char *to, const char *message, const char *password)
+{
+  uint8 hash_stage1[SM3_HASH_SIZE];
+  uint8 hash_stage2[SM3_HASH_SIZE];
+
+  /* Two stage SM3 hash of the password. */
+  compute_two_stage_sm3_hash(password, strlen(password), hash_stage1,
+                              hash_stage2);
+
+  /* create crypt string as SM3(message, hash_stage2) */;
+  compute_sm3_hash_multi((uint8 *) to,(unsigned char*) message, SM3_SCRAMBLE_LENGTH,
+                           hash_stage2, SM3_HASH_SIZE);
+  my_crypt(to, (const uchar *) to, hash_stage1, SM3_SCRAMBLE_LENGTH);
+}
+
 
 /*
     Check that scrambled message corresponds to the password; the function
@@ -340,6 +381,26 @@ check_scramble_sha1(const uchar *scramble_arg, const char *message,
   return MY_TEST(memcmp(hash_stage2, hash_stage2_reassured, SHA1_HASH_SIZE));
 }
 
+my_bool                               // reply    , salt
+check_scramble_sm3(const uchar *scramble_arg, const char *message,
+                    const uint8 *hash_stage2)
+{
+  uint8 buf[SM3_HASH_SIZE];
+  uint8 hash_stage2_reassured[SM3_HASH_SIZE];
+
+  /* create key to encrypt scramble. SM3(salt,hash_stage2) */
+  compute_sm3_hash_multi(buf, (unsigned char*)message, SM3_SCRAMBLE_LENGTH,
+                           (unsigned char*)hash_stage2, SM3_HASH_SIZE);
+  /* encrypt scramble */
+  my_crypt((char *) buf, buf, scramble_arg, SM3_SCRAMBLE_LENGTH);
+
+  /* now buf supposedly contains hash_stage1: so we can get hash_stage2 */
+  compute_sm3_hash(hash_stage2_reassured, (unsigned char *) buf, SM3_HASH_SIZE);
+
+  return MY_TEST(memcmp(hash_stage2, hash_stage2_reassured, SM3_HASH_SIZE));
+}
+
+
 my_bool
 check_scramble(const uchar *scramble_arg, const char *message,
                const uint8 *hash_stage2)
@@ -362,6 +423,12 @@ void get_salt_from_password(uint8 *hash_stage2, const char *password)
   hex2octet(hash_stage2, password+1 /* skip '*' */, SHA1_HASH_SIZE * 2);
 }
 
+void sm3_get_salt_from_password(uint8 *hash_stage2, const char *password)
+{
+  hex2octet(hash_stage2, password+1 /* skip '*' */, SM3_HASH_SIZE * 2);
+}
+
+
 /*
     Convert scrambled password from binary form to asciiz hex string.
   SYNOPSIS
@@ -376,3 +443,8 @@ void make_password_from_salt(char *to, const uint8 *hash_stage2)
   octet2hex(to, (const char*) hash_stage2, SHA1_HASH_SIZE);
 }
 
+void sm3_make_password_from_salt(char *to, const uint8 *hash_stage2)
+{
+  *to++= PVERSION41_CHAR;
+  octet2hex(to, (const char*) hash_stage2, SM3_HASH_SIZE);
+}

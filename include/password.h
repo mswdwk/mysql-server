@@ -27,6 +27,9 @@ void my_make_scrambled_password(char *to, const char *password,
 void my_make_scrambled_password_sha1(char *to, const char *password,
                                      size_t pass_len);
 
+void my_make_scrambled_password_sm3(char *to, const char *password,
+                                      size_t pass_len);
+
 void hash_password(ulong *result, const char *password, uint password_len);
 
 C_MODE_END

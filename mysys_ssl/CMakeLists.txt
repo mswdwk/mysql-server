@@ -35,6 +35,7 @@ SET(MYSYS_SSL_SOURCES
     my_getopt.cc
     my_aes.cc
     my_sha1.cc
+    sm3.cc
     my_sha2.cc
     my_md5.cc
     my_rnd.cc

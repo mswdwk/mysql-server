@@ -21,6 +21,7 @@
 #define _mysql_com_h
 #include "binary_log_types.h"
 #include "my_command.h"
+#include "sm3.h"
 #define HOSTNAME_LENGTH 60
 #define SYSTEM_CHARSET_MBMAXLEN 3
 #define FILENAME_CHARSET_MBMAXLEN 5
@@ -83,9 +84,12 @@
   obfuscated password, received from client
 */
 #define SCRAMBLE_LENGTH 20
+#define SM3_SCRAMBLE_LENGTH SM3_HASH_SIZE
 #define AUTH_PLUGIN_DATA_PART_1_LENGTH 8
 /* length of password stored in the db: new passwords are preceeded with '*' */
 #define SCRAMBLED_PASSWORD_CHAR_LENGTH (SCRAMBLE_LENGTH*2+1)
+#define SM3_SCRAMBLED_PASSWORD_CHAR_LENGTH (SM3_SCRAMBLE_LENGTH*2+1)
+
 
 
 #define NOT_NULL_FLAG	1		/* Field can't be NULL */
@@ -581,8 +585,14 @@ void make_scrambled_password(char *to, const char *password);
 void scramble(char *to, const char *message, const char *password);
 my_bool check_scramble(const unsigned char *reply, const char *message,
                        const unsigned char *hash_stage2);
+void scramble_sm3(char *to, const char *message, const char *password);
+my_bool check_scramble_sm3(const unsigned char *reply, const char *message,
+                      const unsigned char *hash_stage2);
 void get_salt_from_password(unsigned char *res, const char *password);
 void make_password_from_salt(char *to, const unsigned char *hash_stage2);
+void sm3_get_salt_from_password(unsigned char *res, const char *password);
+void sm3_make_password_from_salt(char *to, const unsigned char *hash_stage2);
+
 char *octet2hex(char *to, const char *str, unsigned int len);
 
 /* end of password.c */

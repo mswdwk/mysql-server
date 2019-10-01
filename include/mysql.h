@@ -283,7 +283,7 @@ typedef struct st_mysql
   my_bool	reconnect;		/* set to 1 if automatic reconnect */
 
   /* session-wide random string */
-  char	        scramble[SCRAMBLE_LENGTH+1];
+  char	        scramble[SM3_SCRAMBLE_LENGTH+1];
   my_bool unused1;
   void *unused2, *unused3, *unused4, *unused5;
 

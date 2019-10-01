@@ -104,6 +104,7 @@ my_bool	net_flush(NET *net);
 }
 
 #define native_password_plugin_name "mysql_native_password"
+#define sm3_password_plugin_name "mysql_sm3_password"
 
 PSI_memory_key key_memory_mysql_options;
 PSI_memory_key key_memory_MYSQL_DATA;
@@ -3125,6 +3126,7 @@ C_MODE_END
 typedef struct st_mysql_client_plugin_AUTHENTICATION auth_plugin_t;
 static int client_mpvio_write_packet(struct st_plugin_vio*, const uchar*, int);
 static int native_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql);
+static int sm3_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql);
 static int clear_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql);
 
 static auth_plugin_t native_password_client_plugin=
@@ -3141,6 +3143,22 @@ static auth_plugin_t native_password_client_plugin=
   NULL,
   NULL,
   native_password_auth_client
+};
+
+static auth_plugin_t sm3_password_client_plugin=
+{
+  MYSQL_CLIENT_AUTHENTICATION_PLUGIN,
+  MYSQL_CLIENT_AUTHENTICATION_PLUGIN_INTERFACE_VERSION,
+  sm3_password_plugin_name,
+  "R.J.Silk, Sergei Golubchik",
+  "SM3 MySQL authentication",
+  {1, 0, 0},
+  "GPL",
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  sm3_password_auth_client
 };
 
 static auth_plugin_t clear_password_client_plugin=
@@ -3194,6 +3212,7 @@ extern auth_plugin_t test_trace_plugin;
 struct st_mysql_client_plugin *mysql_client_builtins[]=
 {
   (struct st_mysql_client_plugin *)&native_password_client_plugin,
+  (struct st_mysql_client_plugin *)&sm3_password_client_plugin,
   (struct st_mysql_client_plugin *)&clear_password_client_plugin,
 #if defined(HAVE_OPENSSL)
   (struct st_mysql_client_plugin *) &sha256_password_client_plugin,
@@ -6225,6 +6244,55 @@ static int native_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
     DBUG_PRINT("info", ("sending scramble"));
     scramble(scrambled, (char*)pkt, mysql->passwd);
     if (vio->write_packet(vio, (uchar*)scrambled, SCRAMBLE_LENGTH))
+      DBUG_RETURN(CR_ERROR);
+  }
+  else
+  {
+    DBUG_PRINT("info", ("no password"));
+    if (vio->write_packet(vio, 0, 0)) /* no password */
+      DBUG_RETURN(CR_ERROR);
+  }
+
+  DBUG_RETURN(CR_OK);
+}
+
+static int sm3_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
+{
+  int pkt_len;
+  uchar *pkt;
+
+  DBUG_ENTER("sm3_password_auth_client");
+
+
+  if (((MCPVIO_EXT *)vio)->mysql_change_user)
+  {
+    /*
+      in mysql_change_user() the client sends the first packet.
+      we use the old scramble.
+    */
+    pkt= (uchar*)mysql->scramble;
+    pkt_len= SM3_SCRAMBLE_LENGTH + 1;
+  }
+  else
+  {
+    /* read the scramble */
+    if ((pkt_len= vio->read_packet(vio, &pkt)) < 0)
+      DBUG_RETURN(CR_ERROR);
+
+    if (pkt_len != SM3_SCRAMBLE_LENGTH + 1)
+      DBUG_RETURN(CR_SERVER_HANDSHAKE_ERR);
+
+    /* save it in MYSQL */
+    memcpy(mysql->scramble, pkt, SM3_SCRAMBLE_LENGTH);
+    mysql->scramble[SM3_SCRAMBLE_LENGTH] = 0;
+  }
+
+  if (mysql->passwd[0])
+  {
+    char scrambled[SM3_SCRAMBLE_LENGTH + 1];
+    DBUG_PRINT("info", ("sending scramble"));
+    scramble_sm3(scrambled, (char*)pkt, mysql->passwd);
+    if (vio->write_packet(vio, (uchar*)scrambled, SM3_SCRAMBLE_LENGTH))
       DBUG_RETURN(CR_ERROR);
   }
   else

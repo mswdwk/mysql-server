@@ -65,6 +65,30 @@ enum enum_server_command
   COM_RESET_CONNECTION,
   COM_END
 };
+#include "sm3.h"
+typedef struct
+{
+ unsigned int total[2];
+ unsigned int state[8];
+ unsigned char buffer[64];
+ unsigned char ipad[64];
+ unsigned char opad[64];
+}
+sm3_context;
+void sm3_starts( sm3_context *ctx );
+void sm3_update( sm3_context *ctx, unsigned char *input, int ilen );
+void sm3_finish( sm3_context *ctx, unsigned char output[32] );
+void sm3( unsigned char *input, int ilen,
+          unsigned char output[32]);
+int sm3_file( char *path, unsigned char output[32] );
+void sm3_hmac_starts( sm3_context *ctx, unsigned char *key, int keylen);
+void sm3_hmac_update( sm3_context *ctx, unsigned char *input, int ilen );
+void sm3_hmac_finish( sm3_context *ctx, unsigned char output[32] );
+void sm3_hmac( unsigned char *key, int keylen,
+               unsigned char *input, int ilen,
+               unsigned char output[32] );
+void compute_sm3_hash(unsigned char *digest,unsigned char *input,size_t ilen);
+void compute_sm3_hash_multi(unsigned char *digest,unsigned char *buf1,int len1,unsigned char*buf2,int len2);
 struct st_vio;
 typedef struct st_vio Vio;
 typedef struct st_net {
@@ -177,8 +201,13 @@ void make_scrambled_password(char *to, const char *password);
 void scramble(char *to, const char *message, const char *password);
 my_bool check_scramble(const unsigned char *reply, const char *message,
                        const unsigned char *hash_stage2);
+void scramble_sm3(char *to, const char *message, const char *password);
+my_bool check_scramble_sm3(const unsigned char *reply, const char *message,
+                       const unsigned char *hash_stage2);
 void get_salt_from_password(unsigned char *res, const char *password);
 void make_password_from_salt(char *to, const unsigned char *hash_stage2);
+void sm3_get_salt_from_password(unsigned char *res, const char *password);
+void sm3_make_password_from_salt(char *to, const unsigned char *hash_stage2);
 char *octet2hex(char *to, const char *str, unsigned int len);
 char *get_tty_password(const char *opt_message);
 const char *mysql_errno_to_sqlstate(unsigned int mysql_errno);
@@ -452,7 +481,7 @@ typedef struct st_mysql
   enum mysql_status status;
   my_bool free_me;
   my_bool reconnect;
-  char scramble[20 +1];
+  char scramble[32 +1];
   my_bool unused1;
   void *unused2, *unused3, *unused4, *unused5;
   LIST *stmts;

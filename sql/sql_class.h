@@ -2878,7 +2878,7 @@ public:
   killed_state volatile killed;
 
   /* scramble - random string sent to client on handshake */
-  char	     scramble[SCRAMBLE_LENGTH+1];
+  char	     scramble[SM3_SCRAMBLE_LENGTH+1];
 
   /// @todo: slave_thread is completely redundant, we should use 'system_thread' instead /sven
   bool       slave_thread;
