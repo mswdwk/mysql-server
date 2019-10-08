@@ -19,6 +19,12 @@ MYSQL_ADD_PLUGIN(auth dialog.c
 MYSQL_ADD_PLUGIN(auth_test_plugin test_plugin.c 
   MODULE_ONLY TEST_ONLY)
 
+INCLUDE_DIRECTORIES(SYSTEM ${BOOST_PATCHES_DIR} ${CMAKE_SOURCE_DIR}/sql ${CMAKE_SOURCE_DIR}/sql/auth ${BOOST_INCLUDE_DIR})
+ADD_COMPILE_FLAGS(auth_sm3_plugin.c COMPILE_FLAGS -I${BOOST_PATCHES_DIR} -I${BOOST_INCLUDE_DIR})
+MYSQL_ADD_PLUGIN(mysql_sm3_password auth_sm3_plugin.cc sm3.cc 
+  MODULE_ONLY)
+TARGET_LINK_LIBRARIES(mysql_sm3_password mysys mysys_ssl)
+
 MYSQL_ADD_PLUGIN(qa_auth_interface qa_auth_interface.c 
   MODULE_ONLY TEST_ONLY)
 
