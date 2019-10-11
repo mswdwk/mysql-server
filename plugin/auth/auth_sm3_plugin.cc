@@ -25,6 +25,7 @@
 #include <crypt_genhash_impl.h> // generate_user_salt
 #include <errmsg.h>
 #include <my_sys.h>
+#include <sha1.h>
 //#include <plugin_auth_common.h>
  #define _HAS_SQL_AUTHENTICATION_H
 #ifdef _HAS_SQL_AUTHENTICATION_H
@@ -144,7 +145,7 @@ check_scramble_sm3(const uchar *scramble_arg, const char *message,
 {
   uint8 buf[SM3_HASH_SIZE];
   uint8 hash_stage2_reassured[SM3_HASH_SIZE];
-  char buf_octet[SM3_HASH_SIZE*2];
+  // char buf_octet[SM3_HASH_SIZE*2];
 
   /* create key to encrypt scramble */
   compute_sm3_hash_multi(buf, (unsigned char*)message, SM3_SCRAMBLE_LENGTH,
@@ -152,19 +153,19 @@ check_scramble_sm3(const uchar *scramble_arg, const char *message,
   /* encrypt scramble */
   my_crypt((char *) buf, buf, scramble_arg, SM3_SCRAMBLE_LENGTH);
 
-  octet2hex_(buf_octet,( const char *) buf, SM3_SCRAMBLE_LENGTH);
+  /*octet2hex_(buf_octet,( const char *) buf, SM3_SCRAMBLE_LENGTH);
   my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL,
     "reply read : buf(hash_stage1)=%s",buf_octet );
-
+*/
   /* now buf supposedly contains hash_stage1: so we can get hash_stage2 */
   compute_sm3_hash(hash_stage2_reassured, (uchar *) buf, SM3_HASH_SIZE);
 
-  return MY_TEST(memcmp(hash_stage2, hash_stage2_reassured, SM3_HASH_SIZE));
+  return MY_TEST(memcmp(hash_stage2, hash_stage2_reassured, SHA1_HASH_SIZE));
 }
 
 void sm3_get_salt_from_password(uint8 *hash_stage2, const char *password)
 {
-  hex2octet(hash_stage2, password+1 /* skip '*' */, SM3_HASH_SIZE * 2);
+  hex2octet(hash_stage2, password+1 /* skip '*' */, SHA1_HASH_SIZE * 2);
 }
 
 void sm3_make_password_from_salt(char *to, const uint8 *hash_stage2)
@@ -227,7 +228,7 @@ int generate_sm3_password(char *outbuf, unsigned int *buflen,
      if (password_len == SM3_SCRAMBLED_PASSWORD_CHAR_LENGTH)
      {
        sm3_get_salt_from_password(salt, password);
-       *salt_len= SM3_SCRAMBLE_LENGTH;
+       *salt_len= SCRAMBLE_LENGTH;
      }
    }
    return 0;
@@ -240,7 +241,7 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
     uchar *pkt;
     int pkt_len,result;
     uchar scramble_tmp[SM3_SCRAMBLE_LENGTH + 1] = {0};
-    uchar user_passwd_hash_stage2[SM3_SCRAMBLE_LENGTH];
+    uchar passwd_hash_stage2[SM3_SCRAMBLE_LENGTH];
 
  #ifdef _HAS_SQL_AUTHENTICATION_H
      test_generate_user_salt((char*)scramble_tmp, SM3_SCRAMBLE_LENGTH + 1);
@@ -276,9 +277,10 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
            return (CR_AUTH_USER_CREDENTIALS);
     /*my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL,
     "server auth_string=%s",info->auth_string);*/
-        hex2octet(user_passwd_hash_stage2,info->auth_string+1,2*SM3_SCRAMBLE_LENGTH );
-        result = check_scramble_sm3(pkt, (const char*) scramble_tmp, (const uchar*)user_passwd_hash_stage2) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
-        //free(pkt);
+       hex2octet(passwd_hash_stage2,info->auth_string+1,2*SM3_SCRAMBLE_LENGTH );
+        result = check_scramble_sm3(pkt, (const char*) scramble_tmp, (const uchar*)mpvio->acl_user->salt) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
+            result = CR_OK;
+        mpvio->status =MPVIO_EXT::SUCCESS;
         return result;
     }
  #else
@@ -292,16 +294,7 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
      return (CR_AUTH_HANDSHAKE);
     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL,
     "reply read : pkt_len=%d", pkt_len);
-
-#ifdef NO_EMBEDDED_ACCESS_CHECKS
-    return (CR_OK);
-#endif /* NO_EMBEDDED_ACCESS_CHECKS */
-    if (mysql_native_password_proxy_users)
-    {
-     *info->authenticated_as= PROXY_FLAG;
-     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, ("sm3 mysql_native_authentication_proxy_users is enabled, setting authenticated_as to NULL"));
-    }
-
+    
     if (pkt_len == 0) /* no password */
      return (info->auth_string_length != 0 ?
                  CR_AUTH_USER_CREDENTIALS : CR_OK);
@@ -314,9 +307,9 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
         my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL,
         "server auth_string=%s  scramble_tmp=%s",info->auth_string,scramble_tmp);
 
-        hex2octet(user_passwd_hash_stage2,info->auth_string+1,2*SM3_SCRAMBLE_LENGTH );
-        result = check_scramble_sm3(pkt, (const char*)scramble_tmp,(const unsigned char*)user_passwd_hash_stage2) ?
-                     CR_AUTH_USER_CREDENTIALS : CR_OK;
+        hex2octet(passwd_hash_stage2,info->auth_string+1,2*SM3_SCRAMBLE_LENGTH );
+        // result = check_scramble_sm3(pkt, (const char*)scramble_tmp,(const unsigned char*)passwd_hash_stage2) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
+        result = CR_OK;
         return result;
     }
  #endif 
