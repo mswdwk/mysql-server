@@ -14,10 +14,17 @@
     along with this program; if not, write to the Free Software
     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA */
 
+
+//#include <mysqld.h>
+#define MYSQL_SERVER
 #include <my_global.h>
+//#include <sql_class.h>
 #include <mysql/plugin_auth.h>
 #include <mysql/client_plugin.h>
+#include <mysql/service_locking.h>
 #include <mysql/service_my_plugin_log.h>
+#include <sql_class.h>
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +33,7 @@
 #include <errmsg.h>
 #include <my_sys.h>
 #include <sha1.h>
+
 //#include <plugin_auth_common.h>
  #define _HAS_SQL_AUTHENTICATION_H
 #ifdef _HAS_SQL_AUTHENTICATION_H
@@ -33,9 +41,10 @@
   #include <sql_auth_cache.h>
   #include <sql_authentication.h>
 #endif
+
 #include "sm3.h"
 #define PVERSION41_CHAR '*'
-#define sm3_password_plugin_name_client "mysql_sm3_password"
+
 #define SM3_SCRAMBLE_LENGTH SM3_HASH_SIZE
 #define SM3_SCRAMBLED_PASSWORD_CHAR_LENGTH (SM3_SCRAMBLE_LENGTH*2+1)
 
@@ -101,33 +110,22 @@ void compute_two_stage_sm3_hash(const char *password, size_t pass_len,
 }
 
  void my_make_scrambled_password_sm3(char *to, const char *password,
-                                      size_t pass_len)
+                                      size_t pass_len,const char*user,size_t len)
  {
    uint8 hash_stage2[SM3_HASH_SIZE];
+   uint8 hash_stage2_with_salt[SM3_HASH_SIZE];
  
    /* Two stage SM3 hash of the password. */
    compute_two_stage_sm3_hash(password, pass_len, (uint8 *) to, hash_stage2);
- 
+
+    if (len>0 && user) {
+    compute_sm3_hash_multi(hash_stage2_with_salt,(unsigned char*) user, len,
+                              hash_stage2, SM3_HASH_SIZE);
+   }
    /* convert hash_stage2 to hex string */
    *to++= PVERSION41_CHAR;
-   octet2hex_(to, (const char*) hash_stage2, SM3_HASH_SIZE);
+   octet2hex_(to, (const char*) hash_stage2_with_salt, SM3_HASH_SIZE);
  }
-
- void
-scramble_sm3(char *to, const char *message, const char *password)
-{
-  uint8 hash_stage1[SM3_HASH_SIZE];
-  uint8 hash_stage2[SM3_HASH_SIZE];
-
-  /* Two stage SM3 hash of the password. */
-  compute_two_stage_sm3_hash(password, strlen(password), hash_stage1,
-                              hash_stage2);
-    
-  /* create crypt string as sm3(message, hash_stage2) */;
-  compute_sm3_hash_multi((uint8 *) to,(unsigned char*) message, SM3_SCRAMBLE_LENGTH,
-                           hash_stage2, SM3_HASH_SIZE);
-  my_crypt(to, (const uchar *) to, hash_stage1, SM3_SCRAMBLE_LENGTH);
-}
 
 /********************* SERVER SIDE ****************************************/
 
@@ -141,11 +139,10 @@ static MYSQL_PLUGIN plugin_info_ptr;
 //   reply     ,  salt , hash_stage2
 my_bool
 check_scramble_sm3(const uchar *scramble_arg, const char *message,
-                    const uint8 *hash_stage2)
+                    const uint8 *hash_stage2,char* user_name)
 {
   uint8 buf[SM3_HASH_SIZE];
   uint8 hash_stage2_reassured[SM3_HASH_SIZE];
-  // char buf_octet[SM3_HASH_SIZE*2];
 
   /* create key to encrypt scramble */
   compute_sm3_hash_multi(buf, (unsigned char*)message, SM3_SCRAMBLE_LENGTH,
@@ -160,7 +157,12 @@ check_scramble_sm3(const uchar *scramble_arg, const char *message,
   /* now buf supposedly contains hash_stage1: so we can get hash_stage2 */
   compute_sm3_hash(hash_stage2_reassured, (uchar *) buf, SM3_HASH_SIZE);
 
-  return MY_TEST(memcmp(hash_stage2, hash_stage2_reassured, SHA1_HASH_SIZE));
+  // add user name salt
+    if (user_name){
+  compute_sm3_hash_multi(buf, (uchar*)user_name, strlen(user_name),
+                           hash_stage2_reassured, SM3_HASH_SIZE);
+                           }
+  return MY_TEST(memcmp(hash_stage2, buf, SHA1_HASH_SIZE));
 }
 
 void sm3_get_salt_from_password(uint8 *hash_stage2, const char *password)
@@ -177,7 +179,12 @@ void sm3_make_password_from_salt(char *to, const uint8 *hash_stage2)
 int generate_sm3_password(char *outbuf, unsigned int *buflen,
                              const char *inbuf, unsigned int inbuflen)
 {
-    char* buffer;
+    //THD* _thd = current_thd ;
+    // List<LEX_USER> list = current_thd->lex->user_list;
+    // List_iterator <LEX_USER> user_it(list);
+    LEX_USER*first_user = current_thd->lex->users_list.head();
+
+  char* buffer;
   if (my_validate_password_policy(inbuf, inbuflen))
     return 1;
   /* for empty passwords */
@@ -191,7 +198,10 @@ int generate_sm3_password(char *outbuf, unsigned int *buflen,
                                  MYF(0));
   if (buffer == NULL)
     return 1;
-  my_make_scrambled_password_sm3(buffer, inbuf, inbuflen);
+
+  my_make_scrambled_password_sm3(buffer, inbuf, inbuflen,
+  first_user->user.str,first_user->user.length);
+
   /*
     if buffer specified by server is smaller than the buffer given
     by plugin then return error
@@ -244,7 +254,7 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
     uchar passwd_hash_stage2[SM3_SCRAMBLE_LENGTH];
 
  #ifdef _HAS_SQL_AUTHENTICATION_H
-     test_generate_user_salt((char*)scramble_tmp, SM3_SCRAMBLE_LENGTH + 1);
+     generate_user_salt((char*)scramble_tmp, SM3_SCRAMBLE_LENGTH + 1);
      MPVIO_EXT *mpvio= (MPVIO_EXT *) vio;
     /* send it to the client */
     if (mpvio->write_packet(mpvio, scramble_tmp, SM3_SCRAMBLE_LENGTH + 1))
@@ -278,7 +288,7 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
     /*my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL,
     "server auth_string=%s",info->auth_string);*/
        hex2octet(passwd_hash_stage2,info->auth_string+1,2*SM3_SCRAMBLE_LENGTH );
-        result = check_scramble_sm3(pkt, (const char*) scramble_tmp, (const uchar*)mpvio->acl_user->salt) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
+        result = check_scramble_sm3(pkt, (const char*) scramble_tmp, (const uchar*)mpvio->acl_user->salt,mpvio->acl_user->user) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
             result = CR_OK;
         mpvio->status =MPVIO_EXT::SUCCESS;
         return result;
@@ -352,94 +362,3 @@ mysql_declare_plugin(sm3_plugin)
   NULL,
   0,
 }mysql_declare_plugin_end;
-
-/********************* CLIENT SIDE ***************************************/
-/*
-  client plugin used for testing the plugin API
-*/
-#include <mysql.h>
-
-/* this is a "superset" of MYSQL_PLUGIN_VIO, in C++ I use inheritance */
-typedef struct st_mysql_client_plugin_AUTHENTICATION auth_plugin_t;
-
-typedef struct {
-  int (*read_packet)(struct st_plugin_vio *vio, uchar **buf);
-  int (*write_packet)(struct st_plugin_vio *vio, const uchar *pkt, int pkt_len);
-  void (*info)(struct st_plugin_vio *vio, struct st_plugin_vio_info *info);
-  /* -= end of MYSQL_PLUGIN_VIO =- */
-  MYSQL *mysql;
-  auth_plugin_t *plugin;            /**< what plugin we're under */
-  const char *db;
-  struct {
-    uchar *pkt;                     /**< pointer into NET::buff */
-    uint pkt_len;
-  } cached_server_reply;
-  int packets_read, packets_written; /**< counters for send/received packets */
-  int mysql_change_user;            /**< if it's mysql_change_user() */
-  int last_read_packet_len;         /**< the length of the last *read* packet */
-} MCPVIO_EXT;
-
-static int sm3_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
-{
-  int pkt_len;
-  uchar *pkt,scramble[SM3_SCRAMBLE_LENGTH+1];
-
-  //DBUG_ENTER("sm3_password_auth_client");
-
-  if (((MCPVIO_EXT *)vio)->mysql_change_user)
-  {
-    /*
-      in mysql_change_user() the client sends the first packet.
-      we use the old scramble.
-    */
-    //pkt= (uchar*)mysql->scramble;
-   // generate_user_salt((char*)scramble, SM3_SCRAMBLE_LENGTH + 1);
-    test_generate_user_salt((char*)scramble, SM3_SCRAMBLE_LENGTH + 1);
-    pkt = scramble;
-    pkt_len= SM3_SCRAMBLE_LENGTH + 1;
-  }
-  else
-  {
-    /* read the scramble */
-    if ((pkt_len= vio->read_packet(vio, &pkt)) < 0)
-      return (CR_ERROR);
-
-    if (pkt_len != SM3_SCRAMBLE_LENGTH + 1)
-      return (CR_SERVER_HANDSHAKE_ERR);
-
-    /* save it in MYSQL */
-    // TODO
-  //  memcpy(mysql->scramble, pkt, SM3_SCRAMBLE_LENGTH);
-  //  mysql->scramble[SM3_SCRAMBLE_LENGTH] = 0;
-  }
-
-  if (mysql->passwd[0])
-  {
-    char scrambled[SM3_SCRAMBLE_LENGTH + 1];
-    // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "sending scramble");
-    scramble_sm3(scrambled, (char*)pkt, mysql->passwd);
-    if (vio->write_packet(vio, (uchar*)scrambled, SM3_SCRAMBLE_LENGTH))
-      return (CR_ERROR);
-  }
-  else
-  {
-    //my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, ("no password"));
-    if (vio->write_packet(vio, 0, 0)) /* no password */
-      return (CR_ERROR);
-  }
-
-  return (CR_OK);
-}
-
-mysql_declare_client_plugin(AUTHENTICATION)
-  sm3_password_plugin_name_client,
-  "Georgi Kodinov",
-  "Dialog Client Authentication Plugin",
-  {0,1,0},
-  "GPL",
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  sm3_password_auth_client
-mysql_end_client_plugin;

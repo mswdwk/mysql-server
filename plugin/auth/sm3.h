@@ -1,10 +1,3 @@
-/*************************************************************************
-      > File Name: sm3.h
-      > Author:NEWPLAN
-      > E-mail:newplan001@163.com
-      > Created Time: Thu Apr 13 23:55:50 2017
-************************************************************************/
-
 #ifndef XYSSL_SM3_H
 #define XYSSL_SM3_H
 
@@ -116,7 +109,7 @@ void sm3_hmac( unsigned char *key, int keylen,
 void compute_sm3_hash(unsigned char *digest,unsigned char *input,size_t ilen);
 void compute_sm3_hash_multi(unsigned char *digest,unsigned char *buf1,int len1,unsigned char*buf2,int len2);
 
-
+#define sm3_password_plugin_name_client "mysql_sm3_password_client"
 
 #ifdef __cplusplus
 }
