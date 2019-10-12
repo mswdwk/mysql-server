@@ -179,10 +179,18 @@ void sm3_make_password_from_salt(char *to, const uint8 *hash_stage2)
 int generate_sm3_password(char *outbuf, unsigned int *buflen,
                              const char *inbuf, unsigned int inbuflen)
 {
-    //THD* _thd = current_thd ;
-    // List<LEX_USER> list = current_thd->lex->user_list;
-    // List_iterator <LEX_USER> user_it(list);
-    LEX_USER*first_user = current_thd->lex->users_list.head();
+  List<LEX_USER> list = current_thd->lex->users_list;
+  List_iterator <LEX_USER> iter(list);
+   size_t match_user_name_len = 0;
+   char* match_user_name = NULL;
+   LEX_USER * tmp = NULL;
+   while((tmp=iter++)) {
+        if (tmp->auth.str == inbuf){
+            match_user_name = (char*)tmp->user.str;
+            match_user_name_len = tmp->user.length;
+            break;
+        }
+   }
 
   char* buffer;
   if (my_validate_password_policy(inbuf, inbuflen))
@@ -200,7 +208,7 @@ int generate_sm3_password(char *outbuf, unsigned int *buflen,
     return 1;
 
   my_make_scrambled_password_sm3(buffer, inbuf, inbuflen,
-  first_user->user.str,first_user->user.length);
+  match_user_name,match_user_name_len);
 
   /*
     if buffer specified by server is smaller than the buffer given
@@ -254,7 +262,7 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
     uchar passwd_hash_stage2[SM3_SCRAMBLE_LENGTH];
 
  #ifdef _HAS_SQL_AUTHENTICATION_H
-     generate_user_salt((char*)scramble_tmp, SM3_SCRAMBLE_LENGTH + 1);
+     test_generate_user_salt((char*)scramble_tmp, SM3_SCRAMBLE_LENGTH + 1);
      MPVIO_EXT *mpvio= (MPVIO_EXT *) vio;
     /* send it to the client */
     if (mpvio->write_packet(mpvio, scramble_tmp, SM3_SCRAMBLE_LENGTH + 1))
