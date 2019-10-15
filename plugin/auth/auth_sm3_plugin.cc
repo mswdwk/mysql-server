@@ -159,9 +159,9 @@ check_scramble_sm3(const uchar *scramble_arg, const char *message,
 
   // add user name salt
     if (user_name){
-  compute_sm3_hash_multi(buf, (uchar*)user_name, strlen(user_name),
-                           hash_stage2_reassured, SM3_HASH_SIZE);
-                           }
+    compute_sm3_hash_multi(buf, (uchar*)user_name, strlen(user_name),
+    hash_stage2_reassured, SM3_HASH_SIZE);
+  }
   return MY_TEST(memcmp(hash_stage2, buf, SHA1_HASH_SIZE));
 }
 
@@ -260,8 +260,7 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
     int pkt_len,result;
     uchar scramble_tmp[SM3_SCRAMBLE_LENGTH + 1] = {0};
     uchar passwd_hash_stage2[SM3_SCRAMBLE_LENGTH];
-
- #ifdef _HAS_SQL_AUTHENTICATION_H
+#ifdef _HAS_SQL_AUTHENTICATION_H
      test_generate_user_salt((char*)scramble_tmp, SM3_SCRAMBLE_LENGTH + 1);
      MPVIO_EXT *mpvio= (MPVIO_EXT *) vio;
     /* send it to the client */
@@ -297,8 +296,8 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
     "server auth_string=%s",info->auth_string);*/
        hex2octet(passwd_hash_stage2,info->auth_string+1,2*SM3_SCRAMBLE_LENGTH );
         result = check_scramble_sm3(pkt, (const char*) scramble_tmp, (const uchar*)mpvio->acl_user->salt,mpvio->acl_user->user) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
-            result = CR_OK;
-        mpvio->status =MPVIO_EXT::SUCCESS;
+            //result = CR_OK;
+        //mpvio->status =MPVIO_EXT::SUCCESS;
         return result;
     }
  #else
