@@ -136,7 +136,7 @@ void compute_two_stage_sm3_hash(const char *password, size_t pass_len,
 static MYSQL_PLUGIN plugin_info_ptr; 
 
 
-//   reply     ,  salt , hash_stage2
+//   reply     ,  salt , hash_stage2 with username
 my_bool
 check_scramble_sm3(const uchar *scramble_arg, const char *message,
                     const uint8 *hash_stage2,char* user_name)
@@ -158,7 +158,7 @@ check_scramble_sm3(const uchar *scramble_arg, const char *message,
   compute_sm3_hash(hash_stage2_reassured, (uchar *) buf, SM3_HASH_SIZE);
 
   // add user name salt
-    if (user_name){
+   if (user_name){
     compute_sm3_hash_multi(buf, (uchar*)user_name, strlen(user_name),
     hash_stage2_reassured, SM3_HASH_SIZE);
   }
@@ -295,7 +295,7 @@ static int sm3_password_auth_server(MYSQL_PLUGIN_VIO *vio,
     /*my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL,
     "server auth_string=%s",info->auth_string);*/
        hex2octet(passwd_hash_stage2,info->auth_string+1,2*SM3_SCRAMBLE_LENGTH );
-        result = check_scramble_sm3(pkt, (const char*) scramble_tmp, (const uchar*)mpvio->acl_user->salt,mpvio->acl_user->user) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
+        result = check_scramble_sm3(pkt, (const char*) scramble_tmp, (const uchar*)passwd_hash_stage2,mpvio->acl_user->user) ? CR_AUTH_USER_CREDENTIALS : CR_OK;
             //result = CR_OK;
         //mpvio->status =MPVIO_EXT::SUCCESS;
         return result;

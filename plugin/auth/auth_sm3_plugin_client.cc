@@ -73,18 +73,23 @@ void compute_two_stage_sm3_hash(const char *password, size_t pass_len,
 }
 
  void
-scramble_sm3(char *to, const char *message, const char *password)
+scramble_sm3(char *to, const char *message, const char *password,char* username)
 {
   uint8 hash_stage1[SM3_HASH_SIZE];
   uint8 hash_stage2[SM3_HASH_SIZE];
+  uint8 hash_stage2_with_username[SM3_HASH_SIZE];
 
   /* Two stage SM3 hash of the password. */
   compute_two_stage_sm3_hash(password, strlen(password), hash_stage1,
                               hash_stage2);
-    
+      // add user name salt
+    if (username){
+    compute_sm3_hash_multi(hash_stage2_with_username, (uchar*)username, strlen(username),
+    hash_stage2, SM3_HASH_SIZE);
+  }
   /* create crypt string as sm3(message, hash_stage2) */;
   compute_sm3_hash_multi((uint8 *) to,(unsigned char*) message, SM3_SCRAMBLE_LENGTH,
-                           hash_stage2, SM3_HASH_SIZE);
+                           hash_stage2_with_username, SM3_HASH_SIZE);
   my_crypt(to, (const uchar *) to, hash_stage1, SM3_SCRAMBLE_LENGTH);
 }
 
@@ -152,7 +157,7 @@ static int sm3_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
   {
     char scrambled[SM3_SCRAMBLE_LENGTH + 1];
     // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "sending scramble");
-    scramble_sm3(scrambled, (char*)pkt, mysql->passwd);
+    scramble_sm3(scrambled, (char*)pkt, mysql->passwd,mysql->user);
     if (vio->write_packet(vio, (uchar*)scrambled, SM3_SCRAMBLE_LENGTH))
       return (CR_ERROR);
   }
