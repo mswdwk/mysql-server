@@ -1,15 +1,16 @@
-# Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -145,6 +146,9 @@ SET(CLIENT_API_FUNCTIONS
   mysql_get_ssl_session_reused
   mysql_get_ssl_session_data
   mysql_free_ssl_session_data
+  mysql_binlog_close
+  mysql_binlog_fetch
+  mysql_binlog_open
   CACHE INTERNAL "Functions exported by client API"
 )
 
@@ -241,6 +245,10 @@ ELSE()
 ENDIF()
 
 LIST(APPEND LIBS_TO_LINK ${SSL_LIBRARIES})
+
+IF(WITH_EXT_BACKTRACE)
+  LIST(APPEND LIBS_TO_MERGE backtrace)
+ENDIF()
 
 UNSET(HAVE_WIN32_DNS_SRV)
 UNSET(HAVE_UNIX_DNS_SRV)

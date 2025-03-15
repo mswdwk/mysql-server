@@ -1,18 +1,19 @@
 #ifndef JSON_DOM_INCLUDED
 #define JSON_DOM_INCLUDED
 
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -135,7 +136,7 @@ enum class enum_json_type {
   @return a pointer to the allocated object
 */
 template <typename T, typename... Args>
-inline std::unique_ptr<T> create_dom_ptr(Args &&... args) {
+inline std::unique_ptr<T> create_dom_ptr(Args &&...args) {
   return std::unique_ptr<T>(new (std::nothrow) T(std::forward<Args>(args)...));
 }
 
@@ -699,7 +700,7 @@ class Json_string final : public Json_scalar {
     @param args any arguments accepted by std::string's constructors
   */
   template <typename... Args>
-  explicit Json_string(Args &&... args)
+  explicit Json_string(Args &&...args)
       : Json_scalar(), m_str(std::forward<Args>(args)...) {}
 
   enum_json_type json_type() const override { return enum_json_type::J_STRING; }
@@ -1016,7 +1017,7 @@ class Json_opaque final : public Json_scalar {
     @see Class documentation
   */
   template <typename... Args>
-  explicit Json_opaque(enum_field_types mytype, Args &&... args)
+  explicit Json_opaque(enum_field_types mytype, Args &&...args)
       : Json_scalar(), m_mytype(mytype), m_val(std::forward<Args>(args)...) {}
 
   enum_json_type json_type() const override { return enum_json_type::J_OPAQUE; }
@@ -1930,7 +1931,7 @@ class Json_scalar_holder {
     @param args the arguments to T's constructor
   */
   template <typename T, typename... Args>
-  void emplace(Args &&... args) {
+  void emplace(Args &&...args) {
     static_assert(std::is_base_of<Json_scalar, T>::value, "Not a Json_scalar");
     static_assert(sizeof(T) <= sizeof(m_buffer), "Buffer is too small");
     m_scalar_ptr = &m_buffer.m_null;

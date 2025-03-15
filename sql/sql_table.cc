@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -1475,20 +1476,40 @@ bool rm_table_do_discovery_and_lock_fk_tables(THD *thd, Table_ref *tables) {
   return false;
 }
 
-void Foreign_key_parents_invalidator::add(const char *db_name,
-                                          const char *table_name,
-                                          handlerton *hton) {
+void Foreign_key_parents_invalidator::add(
+    const char *db_name, const char *table_name, handlerton *hton,
+    enum_invalidation_type invalidation_type) {
   m_parent_map.insert(typename Parent_map::value_type(
-      typename Parent_map::key_type(db_name, table_name), hton));
+      typename Parent_map::key_type(db_name, table_name),
+      typename Parent_map::mapped_type(hton, invalidation_type)));
+}
+
+void Foreign_key_parents_invalidator::mark_for_reopen_if_added(
+    const char *db_name, const char *table_name) {
+  auto parent_it =
+      m_parent_map.find(typename Parent_map::key_type(db_name, table_name));
+  if (parent_it != m_parent_map.end()) {
+    parent_it->second.second =
+        enum_invalidation_type::INVALIDATE_AND_MARK_FOR_REOPEN;
+  }
 }
 
 void Foreign_key_parents_invalidator::invalidate(THD *thd) {
   for (auto parent_it : m_parent_map) {
-    // Invalidate Table and Table Definition Caches too.
-    mysql_ha_flush_table(thd, parent_it.first.first.c_str(),
-                         parent_it.first.second.c_str());
-    close_all_tables_for_name(thd, parent_it.first.first.c_str(),
-                              parent_it.first.second.c_str(), false);
+    if (parent_it.second.second ==
+        enum_invalidation_type::INVALIDATE_AND_CLOSE_TABLE) {
+      // Invalidate Table and Table Definition Caches too.
+      mysql_ha_flush_table(thd, parent_it.first.first.c_str(),
+                           parent_it.first.second.c_str());
+      close_all_tables_for_name(thd, parent_it.first.first.c_str(),
+                                parent_it.first.second.c_str(), false);
+    } else {
+      assert(parent_it.second.second ==
+             enum_invalidation_type::INVALIDATE_AND_MARK_FOR_REOPEN);
+      tdc_remove_table(thd, TDC_RT_MARK_FOR_REOPEN,
+                       parent_it.first.first.c_str(),
+                       parent_it.first.second.c_str(), false);
+    }
 
     /*
       TODO: Should revisit the way we do invalidation to avoid
@@ -2684,6 +2705,12 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
   const bool is_partitioned = table.s->m_part_info != nullptr;
   unique_ptr_destroy_only<handler> handler(
       get_new_handler(table.s, is_partitioned, thd->mem_root, hton));
+
+  DBUG_EXECUTE_IF("before_secondary_engine_load_start", {
+    const char action[] =
+        "now SIGNAL before_load_start WAIT_FOR metadata_check_done";
+    assert(!debug_sync_set_action(thd, STRING_WITH_LEN(action)));
+  });
 
   // Load table from primary into secondary engine and add to change
   // propagation if that is enabled.
@@ -3892,6 +3919,8 @@ namespace {
 
 struct sort_keys {
   bool operator()(const KEY &a, const KEY &b) const {
+    // std::sort may compare an element to itself:
+    if (&a == &b) return false;
     // Sort UNIQUE before not UNIQUE.
     if ((a.flags ^ b.flags) & HA_NOSAME) return a.flags & HA_NOSAME;
 
@@ -7780,7 +7809,7 @@ static Create_field *add_functional_index_to_create_list(
 
   // First we need to resolve the expression in the functional index so that we
   // know the correct collation, data type, length etc...
-  ulong saved_privilege = thd->want_privilege;
+  const Access_bitmask saved_privilege = thd->want_privilege;
   thd->want_privilege = SELECT_ACL;
 
   {
@@ -7791,6 +7820,8 @@ static Create_field *add_functional_index_to_create_list(
 
     Functional_index_error_handler error_handler(
         {key_spec->name.str, key_spec->name.length}, thd);
+
+    const Prepared_stmt_arena_holder ps_arena_holder(thd);
 
     Item *expr = kp->get_expression();
     if (expr->type() == Item::FIELD_ITEM) {
@@ -10338,16 +10369,18 @@ static bool check_if_keyname_exists(const char *name, KEY *start, KEY *end) {
 
 static const char *make_unique_key_name(const char *field_name, KEY *start,
                                         KEY *end) {
-  char buff[MAX_FIELD_NAME], *buff_end;
+  // NOTE: This may not handle multi-byte characters properly
+  char buff[NAME_CHAR_LEN + 1];
 
   if (!check_if_keyname_exists(field_name, start, end) &&
       my_strcasecmp(system_charset_info, field_name, primary_key_name))
     return field_name;  // Use fieldname
-  buff_end = strmake(buff, field_name, sizeof(buff) - 4);
 
+  // Reserve space for '_', two-digit sequence number and terminating null char:
+  char *buff_end = strmake(buff, field_name, sizeof(buff) - 4);
   /*
-    Only 3 chars + '\0' left, so need to limit to 2 digit
-    This is ok as we can't have more than 100 keys anyway
+    2 digits support up to 100 keys, which is more than the normal MAX_INDEXES
+    limit (64).
   */
   for (uint i = 2; i < 100; i++) {
     *buff_end = '_';
@@ -11118,9 +11151,9 @@ bool mysql_create_like_table(THD *thd, Table_ref *table, Table_ref *src_table,
             goto err;
         }
       } else  // Case 1
-          if (write_bin_log(thd, true, thd->query().str, thd->query().length,
-                            is_trans))
-        goto err;
+        if (write_bin_log(thd, true, thd->query().str, thd->query().length,
+                          is_trans))
+          goto err;
     }
     /*
       Case 3 and 4 does nothing under RBR
@@ -11544,6 +11577,7 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
 
   // Initiate loading into or unloading from secondary engine.
   if (is_load) {
+    DEBUG_SYNC(thd, "before_secondary_engine_load_table");
     if (DBUG_EVALUATE_IF("sim_secload_fail",
                          (my_error(ER_SECONDARY_ENGINE, MYF(0),
                                    "Simulated failure of secondary_load()"),
@@ -11643,7 +11677,7 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
              ("commit succeeded for alter table %s secondary_%s", full_tab_name,
               (is_load ? "load" : "unload")));
   // Transaction committed successfully, no rollback will be necessary.
-  rollback_guard.commit();
+  rollback_guard.release();
 
   if (cleanup()) return true;
 
@@ -13577,6 +13611,8 @@ static bool mysql_inplace_alter_table(
     reopen_tables = true;
     close_temporary_table(thd, altered_table, true, false);
     rollback_needs_dict_cache_reset = true;
+
+    DEBUG_SYNC(thd, "alter_table_inplace_will_need_reset");
 
     /*
       Replace table definition in the data-dictionary.

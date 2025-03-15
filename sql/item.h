@@ -1,18 +1,19 @@
 #ifndef ITEM_INCLUDED
 #define ITEM_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -56,6 +57,7 @@
 #include "mysql_com.h"
 #include "mysql_time.h"
 #include "mysqld_error.h"
+#include "sql/auth/auth_acls.h"  // Access_bitmask
 #include "sql/enum_query_type.h"
 #include "sql/field.h"  // Derivation
 #include "sql/mem_root_array.h"
@@ -505,9 +507,9 @@ struct Check_function_as_value_generator_parameters {
   int get_unnamed_function_error_code() const {
     return ((source == VGS_GENERATED_COLUMN)
                 ? ER_GENERATED_COLUMN_FUNCTION_IS_NOT_ALLOWED
-                : (source == VGS_DEFAULT_EXPRESSION)
-                      ? ER_DEFAULT_VAL_GENERATED_FUNCTION_IS_NOT_ALLOWED
-                      : ER_CHECK_CONSTRAINT_FUNCTION_IS_NOT_ALLOWED);
+            : (source == VGS_DEFAULT_EXPRESSION)
+                ? ER_DEFAULT_VAL_GENERATED_FUNCTION_IS_NOT_ALLOWED
+                : ER_CHECK_CONSTRAINT_FUNCTION_IS_NOT_ALLOWED);
   }
 };
 /*
@@ -674,7 +676,8 @@ class Settable_routine_parameter {
                       MODE_OUT   - UPDATE_ACL
                       MODE_INOUT - SELECT_ACL | UPDATE_ACL
   */
-  virtual void set_required_privilege(ulong privilege [[maybe_unused]]) {}
+  virtual void set_required_privilege(Access_bitmask privilege
+                                      [[maybe_unused]]) {}
 
   /*
     Set parameter value.
@@ -931,7 +934,8 @@ class Item : public Parse_tree_node {
   };
 
   enum Bool_test  ///< Modifier for result transformation
-  { BOOL_IS_TRUE = 0x00,
+  {
+    BOOL_IS_TRUE = 0x00,
     BOOL_IS_FALSE = 0x01,
     BOOL_IS_UNKNOWN = 0x02,
     BOOL_NOT_TRUE = 0x03,
@@ -1228,12 +1232,11 @@ class Item : public Parse_tree_node {
      */
     if (data_type() != MYSQL_TYPE_INVALID && !(pin && type() == PARAM_ITEM))
       return false;
-    if (propagate_type(thd,
-                       (def == MYSQL_TYPE_VARCHAR)
-                           ? Type_properties(def, Item::default_charset())
-                           : (def == MYSQL_TYPE_JSON)
-                                 ? Type_properties(def, &my_charset_utf8mb4_bin)
-                                 : Type_properties(def)))
+    if (propagate_type(thd, (def == MYSQL_TYPE_VARCHAR)
+                                ? Type_properties(def, Item::default_charset())
+                            : (def == MYSQL_TYPE_JSON)
+                                ? Type_properties(def, &my_charset_utf8mb4_bin)
+                                : Type_properties(def)))
       return true;
     if (pin) pin_data_type();
     if (inherit) set_data_type_inherited();
@@ -1390,6 +1393,13 @@ class Item : public Parse_tree_node {
   */
   inline void set_data_type(enum_field_types data_type) {
     m_data_type = static_cast<uint8>(data_type);
+  }
+
+  inline void set_data_type_null() {
+    set_data_type(MYSQL_TYPE_NULL);
+    collation.set(&my_charset_bin, DERIVATION_IGNORABLE);
+    max_length = 0;
+    set_nullable(true);
   }
 
   inline void set_data_type_bool() {
@@ -2452,7 +2462,8 @@ class Item : public Parse_tree_node {
 
   virtual bool walk(Item_processor processor, enum_walk walk [[maybe_unused]],
                     uchar *arg) {
-    return (this->*processor)(arg);
+    return ((walk & enum_walk::PREFIX) && (this->*processor)(arg)) ||
+           ((walk & enum_walk::POSTFIX) && (this->*processor)(arg));
   }
 
   /** @see WalkItem, CompileItem, TransformItem */
@@ -2591,6 +2602,7 @@ class Item : public Parse_tree_node {
 
     friend class Item_sum;
     friend class Item_field;
+    friend class Item_default_value;
     friend class Item_view_ref;
   };
 
@@ -2724,6 +2736,7 @@ class Item : public Parse_tree_node {
     */
     Query_block *const m_root;
 
+    friend class Item;
     friend class Item_sum;
     friend class Item_subselect;
     friend class Item_ref;
@@ -2732,11 +2745,12 @@ class Item : public Parse_tree_node {
      Clean up after removing the item from the item tree.
 
      param arg pointer to a Cleanup_after_removal_context object
+     @todo: If class ORDER is refactored so that all indirect
+     grouping/ordering expressions are represented with Item_ref
+     objects, all implementations of cleanup_after_removal() except
+     the one for Item_ref can be removed.
   */
-  virtual bool clean_up_after_removal(uchar *arg [[maybe_unused]]) {
-    assert(arg != nullptr);
-    return false;
-  }
+  virtual bool clean_up_after_removal(uchar *arg);
 
   /// @see Distinct_check::check_query()
   virtual bool aggregate_check_distinct(uchar *) { return false; }
@@ -3010,8 +3024,18 @@ class Item : public Parse_tree_node {
   struct Item_field_replacement : Item_replacement {
     Field *m_target;     ///< The field to be replaced
     Item_field *m_item;  ///< The replacement field
-    Item_field_replacement(Field *target, Item_field *item, Query_block *select)
-        : Item_replacement(select, select), m_target(target), m_item(item) {}
+    enum class Mode {
+      CONFLATE,      // include both Item_field and Item_default_value
+      FIELD,         // ignore Item_default_value
+      DEFAULT_VALUE  // ignore Item_field
+    };
+    Mode m_default_value;
+    Item_field_replacement(Field *target, Item_field *item, Query_block *select,
+                           Mode default_value = Mode::CONFLATE)
+        : Item_replacement(select, select),
+          m_target(target),
+          m_item(item),
+          m_default_value(default_value) {}
   };
 
   struct Item_view_ref_replacement : Item_replacement {
@@ -3191,13 +3215,20 @@ class Item : public Parse_tree_node {
   */
   bool is_blob_field() const;
 
+  /// @returns number of references to an item.
+  uint reference_count() const { return m_ref_count; }
+
   /// Increment reference count
-  void increment_ref_count() { ++m_ref_count; }
+  void increment_ref_count() {
+    assert(!m_abandoned);
+    ++m_ref_count;
+  }
 
   /// Decrement reference count
   uint decrement_ref_count() {
     assert(m_ref_count > 0);
-    return --m_ref_count;
+    if (--m_ref_count == 0) m_abandoned = true;
+    return m_ref_count;
   }
 
  protected:
@@ -3316,6 +3347,8 @@ class Item : public Parse_tree_node {
   }
   virtual bool strip_db_table_name_processor(uchar *) { return false; }
 
+  bool is_abandoned() const { return m_abandoned; }
+
  private:
   virtual bool subq_opt_away_processor(uchar *) { return false; }
 
@@ -3358,7 +3391,8 @@ class Item : public Parse_tree_node {
   */
   uint32 max_length;  ///< Maximum length, in bytes
   enum item_marker    ///< Values for member 'marker'
-  { MARKER_NONE = 0,
+  {
+    MARKER_NONE = 0,
     /// When contextualization or itemization adds an implicit comparison '0<>'
     /// (see make_condition()), to record that this Item_func_ne was created for
     /// this purpose; this value is tested during resolution.
@@ -3381,7 +3415,8 @@ class Item : public Parse_tree_node {
     MARKER_TRAVERSAL = 8,
     /// When pushing index conditions: it says whether a condition uses only
     /// indexed columns.
-    MARKER_ICP_COND_USES_INDEX_ONLY = 10 };
+    MARKER_ICP_COND_USES_INDEX_ONLY = 10
+  };
   /**
     This member has several successive meanings, depending on the phase we're
     in (@see item_marker).
@@ -3401,10 +3436,23 @@ class Item : public Parse_tree_node {
   Item_result cmp_context;  ///< Comparison context
  private:
   /**
-    Number of references to this item from Item_ref objects. Used during
-    resolving to manage proper deletion of item sub-trees.
+    Number of references to this item. It is used for two purposes:
+    1. When eliminating redundant expressions, the reference count is used
+       to tell how many Item_ref objects that point to an item. When a
+       sub-tree of items is eliminated, it is traversed and any item that
+       is referenced from an Item_ref has its reference count decremented.
+       Only when the reference count reaches zero is the item actually deleted.
+    2. Keeping track of unused expressions selected from merged derived tables.
+       An item that is added to the select list of a query block has its
+       reference count set to 1. Any references from outer query blocks are
+       through Item_ref objects, thus they will cause the reference count
+       to be incremented. At end of resolving, the reference counts of all
+       items in select list of merged derived tables are decremented, thus
+       if the reference count becomes zero, the expression is known to
+       be unused and can be removed.
   */
   uint m_ref_count{0};
+  bool m_abandoned{false};    ///< true if item has been fully de-referenced
   const bool is_parser_item;  ///< true if allocated directly by parser
   int8 is_expensive_cache;    ///< Cache of result of is_expensive()
   uint8 m_data_type;          ///< Data type assigned to Item
@@ -4060,16 +4108,6 @@ class Item_ident : public Item {
   /// Marks that this Item's name is alias of SELECT expression
   void set_alias_of_expr() { m_alias_of_expr = true; }
 
-  bool walk(Item_processor processor, enum_walk walk, uchar *arg) override {
-    /*
-      Item_ident processors like aggregate_check*() use
-      enum_walk::PREFIX|enum_walk::POSTFIX and depend on the processor being
-      called twice then.
-    */
-    return ((walk & enum_walk::PREFIX) && (this->*processor)(arg)) ||
-           ((walk & enum_walk::POSTFIX) && (this->*processor)(arg));
-  }
-
   /**
     Argument structure for walk processor Item::update_depended_from
   */
@@ -4223,7 +4261,7 @@ class Item_field : public Item_ident {
     if any_privileges set to true then here real effective privileges will
     be stored
   */
-  uint have_privileges;
+  Access_bitmask have_privileges{0};
   /* field need any privileges (for VIEW creation) */
   bool any_privileges;
   /*
@@ -5677,9 +5715,6 @@ class Item_ref : public Item_ident {
   bool pusheddown_depended_from{false};
 
  private:
-  /// True if referenced item has been unlinked, used during item tree removal
-  bool m_unlinked{false};
-
   Field *result_field{nullptr}; /* Save result here */
 
  protected:
@@ -5947,30 +5982,52 @@ class Item_view_ref final : public Item_ref {
   /**
     Takes into account whether an Item in a derived table / view is part of an
     inner table of an outer join.
-
-    1) If the field is an outer reference, return OUTER_REF_TABLE_BIT.
-    2) Else
-       2a) If the field is const_for_execution and the field is used in the
-           inner part of an outer join, return the inner tables of the outer
-           join. (A 'const' field that depends on the inner table of an outer
-           join shouldn't be interpreted as const.)
-       2b) Else return the used_tables info of the underlying field.
-
-    @note The call to const_for_execution has been replaced by
-          "!(inner_map & ~INNER_TABLE_BIT)" to avoid multiple and recursive
-          calls to used_tables. This can create a problem when Views are
-          created using other views
-*/
+  */
   table_map used_tables() const override {
-    if (depended_from != nullptr) return OUTER_REF_TABLE_BIT;
+    const Item_ref *inner_ref = this;
+    const Item *inner_item;
+    /*
+      Check whether any of the inner expressions is an outer reference,
+      and if it is, return OUTER_REF_TABLE_BIT.
+    */
+    while (true) {
+      if (inner_ref->depended_from != nullptr) {
+        return OUTER_REF_TABLE_BIT;
+      }
+      inner_item = inner_ref->ref_item();
+      if (inner_item->type() != REF_ITEM) break;
+      inner_ref = down_cast<const Item_ref *>(inner_item);
+    }
 
-    table_map inner_map = ref_item()->used_tables();
-    return !(inner_map & ~INNER_TABLE_BIT) && first_inner_table != nullptr
-               ? ref_item()->real_item()->type() == FIELD_ITEM
-                     ? down_cast<Item_field *>(ref_item()->real_item())
-                           ->table_ref->map()
-                     : first_inner_table->map()
-               : inner_map;
+    const Item_field *field = inner_item->type() == FIELD_ITEM
+                                  ? down_cast<const Item_field *>(inner_item)
+                                  : nullptr;
+
+    // If the field is an outer reference, return OUTER_REF_TABLE_BIT
+    if (field != nullptr && field->depended_from != nullptr) {
+      return OUTER_REF_TABLE_BIT;
+    }
+    /*
+      View references with expressions that are not deemed constant during
+      execution, or when they are constants but the merged view/derived table
+      was not from the inner side of an outer join, simply return the used
+      tables of the underlying item. A "const" field that comes from an inner
+      side of an outer join is not constant, since NULL values are issued
+      when there are no matching rows in the inner table(s).
+    */
+    if (!inner_item->const_for_execution() || first_inner_table == nullptr) {
+      return inner_item->used_tables();
+    }
+    /*
+      This is a const expression on the inner side of an outer join.
+      Augment its used table information with the map of an inner table from
+      the outer join nest. field can be nullptr if it is from a const table.
+      In this case, returning the table's original table map is required by
+      the join optimizer.
+    */
+    return field != nullptr
+               ? field->table_ref->map()
+               : inner_item->used_tables() | first_inner_table->map();
   }
 
   bool eq(const Item *item, bool) const override;
@@ -6391,6 +6448,8 @@ class Item_default_value final : public Item_field {
              enum_query_type query_type) const override;
   table_map used_tables() const override { return 0; }
   Item *get_tmp_table_item(THD *thd) override { return copy_or_same(thd); }
+  bool collect_item_field_or_view_ref_processor(uchar *arg) override;
+  Item *replace_item_field(uchar *) override;
 
   /*
     No additional privilege check for default values, as the walk() function
@@ -6410,6 +6469,7 @@ class Item_default_value final : public Item_field {
   }
 
   Item *transform(Item_transformer transformer, uchar *args) override;
+  Item *argument() const { return arg; }
 
  private:
   /// The argument for this function
@@ -6527,7 +6587,8 @@ class Item_trigger_field final : public Item_field,
 
   Item_trigger_field(Name_resolution_context *context_arg,
                      enum_trigger_variable_type trigger_var_type_arg,
-                     const char *field_name_arg, ulong priv, const bool ro)
+                     const char *field_name_arg, Access_bitmask priv,
+                     const bool ro)
       : Item_field(context_arg, nullptr, nullptr, field_name_arg),
         trigger_var_type(trigger_var_type_arg),
         next_trig_field_list(nullptr),
@@ -6537,7 +6598,8 @@ class Item_trigger_field final : public Item_field,
         read_only(ro) {}
   Item_trigger_field(const POS &pos,
                      enum_trigger_variable_type trigger_var_type_arg,
-                     const char *field_name_arg, ulong priv, const bool ro)
+                     const char *field_name_arg, Access_bitmask priv,
+                     const bool ro)
       : Item_field(pos, nullptr, nullptr, field_name_arg),
         trigger_var_type(trigger_var_type_arg),
         field_idx((uint)-1),
@@ -6558,7 +6620,7 @@ class Item_trigger_field final : public Item_field,
   Item *copy_or_same(THD *) override { return this; }
   Item *get_tmp_table_item(THD *thd) override { return copy_or_same(thd); }
   void cleanup() override;
-  void set_required_privilege(ulong privilege) override {
+  void set_required_privilege(Access_bitmask privilege) override {
     want_privilege = privilege;
   }
 
@@ -6599,7 +6661,7 @@ class Item_trigger_field final : public Item_field,
     set_required_privilege() is called to appropriately update
     want_privilege).
   */
-  ulong want_privilege;
+  Access_bitmask want_privilege;
   GRANT_INFO *table_grants;
   /*
     Trigger field is read-only unless it belongs to the NEW row in a

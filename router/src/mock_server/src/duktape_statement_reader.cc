@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,7 +37,6 @@
 #include <mysqld_error.h>
 #include <openssl/ssl.h>
 
-#include "duk_logging.h"
 #include "duk_module_shim.h"
 #include "duk_node_fs.h"
 #include "duktape.h"
@@ -45,6 +45,7 @@
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/stdx/expected.h"
 #include "mysqlrouter/classic_protocol.h"
+#include "router_config.h"  // MYSQL_ROUTER_VERSION
 #include "statement_reader.h"
 
 IMPORT_LOG_FUNCTIONS()
@@ -807,7 +808,11 @@ DuktapeStatementReader::server_greeting(bool with_tls) {
   auto *ctx = pimpl_->ctx;
 
   // defaults
-  std::string server_version = "8.0.23-mock";
+  std::string server_version =
+      std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+      std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+      std::to_string(MYSQL_ROUTER_VERSION_PATCH) + "-mock";
+
   uint32_t connection_id = 0;
   classic_protocol::capabilities::value_type server_capabilities =
       classic_protocol::capabilities::long_password |

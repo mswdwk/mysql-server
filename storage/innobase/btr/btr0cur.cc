@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2024, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2012, Facebook Inc.
 
@@ -14,12 +14,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -1283,7 +1284,7 @@ retry_page_get:
       rw_lock_s_lock(&block->lock, UT_LOCATION_HERE);
     }
 
-    lock_prdt_lock(block, &prdt, index, LOCK_S, LOCK_PREDICATE, cursor->thr);
+    lock_prdt_lock(block, &prdt, index, cursor->thr);
 
     if (rw_latch == RW_NO_LATCH && height != 0) {
       rw_lock_s_unlock(&(block->lock));
@@ -4518,7 +4519,7 @@ bool btr_cur_compress_if_useful(
     }
 
     /* Check whether page lock prevents the compression */
-    if (!lock_test_prdt_page_lock(trx, page_get_page_id(page))) {
+    if (lock_other_has_prdt_page_lock(trx, page_get_page_id(page))) {
       return (false);
     }
   }

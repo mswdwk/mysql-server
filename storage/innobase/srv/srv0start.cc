@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -21,12 +21,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -244,7 +245,7 @@ static dberr_t srv_undo_tablespace_create(undo::Tablespace &undo_space) {
   fh = os_file_create(innodb_data_file_key, file_name,
                       (srv_read_only_mode ? OS_FILE_OPEN : OS_FILE_CREATE) |
                           OS_FILE_ON_ERROR_NO_EXIT,
-                      OS_FILE_NORMAL, OS_DATA_FILE, srv_read_only_mode, &ret);
+                      OS_DATA_FILE, srv_read_only_mode, &ret);
 
   if (ret == false) {
     std::ostringstream stmt;
@@ -560,7 +561,7 @@ dberr_t srv_undo_tablespace_open(undo::Tablespace &undo_space) {
   fh = os_file_create(
       innodb_data_file_key, file_name,
       OS_FILE_OPEN_RETRY | OS_FILE_ON_ERROR_NO_EXIT | OS_FILE_ON_ERROR_SILENT,
-      OS_FILE_NORMAL, OS_DATA_FILE, srv_read_only_mode, &success);
+      OS_DATA_FILE, srv_read_only_mode, &success);
   if (!success) {
     return (DB_CANNOT_OPEN_FILE);
   }
@@ -1534,11 +1535,6 @@ static dberr_t recreate_redo_files(lsn_t &flushed_lsn) {
 
   fil_open_system_tablespace_files();
 
-  err = log_start(*log_sys, flushed_lsn, flushed_lsn);
-  if (err != DB_SUCCESS) {
-    return err;
-  }
-
   return DB_SUCCESS;
 }
 
@@ -1821,17 +1817,6 @@ dberr_t srv_start(bool create_new_db) {
   err = srv_sys_space.open_or_create(false, create_new_db, &sum_of_new_sizes,
                                      &flushed_lsn);
 
-  if (flushed_lsn < LOG_START_LSN) {
-    ut_ad(!create_new_db);
-    /* Data directory hasn't been initialized yet. */
-    ib::error(ER_IB_MSG_DATA_DIRECTORY_NOT_INITIALIZED_OR_CORRUPTED);
-    return DB_ERROR;
-  }
-
-  /* FIXME: This can be done earlier, but we now have to wait for
-  checking of system tablespace. */
-  dict_persist_init();
-
   switch (err) {
     case DB_SUCCESS:
       break;
@@ -1845,6 +1830,17 @@ dberr_t srv_start(bool create_new_db) {
 
       return (srv_init_abort(err));
   }
+
+  if (flushed_lsn < LOG_START_LSN) {
+    ut_ad(!create_new_db);
+    /* Data directory hasn't been initialized yet. */
+    ib::error(ER_IB_MSG_DATA_DIRECTORY_NOT_INITIALIZED_OR_CORRUPTED);
+    return srv_init_abort(DB_ERROR);
+  }
+
+  /* FIXME: This can be done earlier, but we now have to wait for
+  checking of system tablespace. */
+  dict_persist_init();
 
   mtr_t::s_logging.init();
 

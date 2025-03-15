@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -231,7 +232,7 @@ class execution_context {
   std::unordered_map<service_key_type, service *> keys_;
 
   template <typename Service, class... Args>
-  service *add_service(Args &&... args) {
+  service *add_service(Args &&...args) {
     services_.push_back(
         ServicePtr{new Service{*this, std::forward<Args>(args)...}});
 
@@ -245,7 +246,7 @@ class execution_context {
   friend bool has_service(const execution_context &ctx) noexcept;
 
   template <class Service, class... Args>
-  friend Service &make_service(execution_context &ctx, Args &&... args);
+  friend Service &make_service(execution_context &ctx, Args &&...args);
 };
 
 // 13.7.5 [async.exec.ctx.globals]
@@ -272,7 +273,7 @@ typename Service::key_type &use_service(execution_context &ctx) {
 }
 
 template <class Service, class... Args>
-Service &make_service(execution_context &ctx, Args &&... args) {
+Service &make_service(execution_context &ctx, Args &&...args) {
   using Key = typename Service::key_type;
 
   static_assert(std::is_base_of<execution_context::service, Key>::value,

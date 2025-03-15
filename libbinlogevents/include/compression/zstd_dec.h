@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,74 +21,65 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#ifndef LIBBINLOGEVENTS_COMPRESSION_ZSTD_DEC_H_INCLUDED
-#define LIBBINLOGEVENTS_COMPRESSION_ZSTD_DEC_H_INCLUDED
+#ifndef LIBBINLOGEVENTS_COMPRESSION_ZSTD_DEC_H_
+#define LIBBINLOGEVENTS_COMPRESSION_ZSTD_DEC_H_
 
 #include <zstd.h>
-#include <cstddef>
-#include <vector>
 
 #include "decompressor.h"
+#include "libbinlogevents/include/nodiscard.h"
 
 namespace binary_log {
 namespace transaction {
 namespace compression {
 
-/**
-  This class implements a ZSTD decompressor.
- */
+/// Decompressor class that uses the ZSTD library.
 class Zstd_dec : public Decompressor {
- private:
-  Zstd_dec &operator=(const Zstd_dec &rhs) = delete;
-  Zstd_dec(const Zstd_dec &) = delete;
-
- protected:
-  ZSTD_DStream *m_ctx{nullptr};
-
  public:
+  using typename Decompressor::Char_t;
+  using typename Decompressor::Grow_constraint_t;
+  using typename Decompressor::Size_t;
+  static constexpr type type_code = ZSTD;
+
   Zstd_dec();
   ~Zstd_dec() override;
 
-  /**
-    Shall return the compression type code.
+  Zstd_dec(const Zstd_dec &) = delete;
+  Zstd_dec(const Zstd_dec &&) = delete;
+  Zstd_dec &operator=(const Zstd_dec &) = delete;
+  Zstd_dec &operator=(const Zstd_dec &&) = delete;
 
-    @return the compression type code.
-   */
-  type compression_type_code() override;
+ private:
+  /// @return ZSTD
+  type do_get_type_code() const override;
 
-  /**
-    Shall open the decompressor. This member function must be called
-    before any decompression operation takes place over the buffer
-    supplied.
+  /// @copydoc Decompressor::do_reset
+  void do_reset() override;
 
-    @return false on success, true otherwise.
-   */
-  bool open() override;
+  /// @copydoc Decompressor::do_feed
+  void do_feed(const Char_t *input_data, Size_t input_size) override;
 
-  /**
-    This member function shall decompress the buffer provided and put the
-    decompressed payload into the output buffer.
+  /// @copydoc Decompressor::do_decompress
+  [[NODISCARD]] std::pair<Decompress_status, Size_t> do_decompress(
+      Char_t *out, Size_t output_size) override;
 
-    @param data a pointer to the buffer holding the data to decompress
-    @param length the size of the data to decompress.
+  /// @copydoc Decompressor::do_get_grow_constraint_hint
+  Grow_constraint_t do_get_grow_constraint_hint() const override;
 
-    @return false on success, true otherwise.
-   */
-  std::tuple<std::size_t, bool> decompress(const unsigned char *data,
-                                           size_t length) override;
+  /// Deallocate the ZSTD decompression context.
+  void destroy();
 
-  /**
-    This member function shall close the decompressor. It must be called
-    after this decompressor is not needed anymore. It shall free the
-    resources it has used for the decompression activities.
+  /// ZSTD decompression context object.
+  ZSTD_DStream *m_ctx{nullptr};
 
-    @return false on success, true otherwise.
-   */
-  bool close() override;
+  /// ZSTD input buffer.
+  ZSTD_inBuffer m_ibuf{nullptr, 0, 0};
+
+  bool m_frame_boundary = false;
 };
 
 }  // namespace compression
 }  // end of namespace transaction
 }  // end of namespace binary_log
 
-#endif  // ifndef LIBBINLOGEVENTS_COMPRESSION_ZSTD_DEC_H_INCLUDED
+#endif  // ifndef LIBBINLOGEVENTS_COMPRESSION_ZSTD_DEC_H_

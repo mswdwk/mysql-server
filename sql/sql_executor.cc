@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -54,6 +55,7 @@
 #include "my_byteorder.h"
 #include "my_checksum.h"
 #include "my_dbug.h"
+#include "my_hash_combine.h"
 #include "my_loglevel.h"
 #include "my_sqlcommand.h"
 #include "my_sys.h"
@@ -123,8 +125,43 @@ using std::vector;
 static int read_system(TABLE *table);
 static bool alloc_group_fields(JOIN *join, ORDER *group);
 
-/// Maximum amount of space (in bytes) to allocate for a Record_buffer.
+/// The minimum size of the record buffer allocated by set_record_buffer().
+/// If all the rows (estimated) can be accomodated with a smaller
+/// buffer than the minimum size, we allocate only the required size.
+/// Else, set_record_buffer() adjusts the size to the minimum size for
+/// smaller ranges. This value shouldn't be too high, as benchmarks
+/// have shown that a too big buffer can hurt performance in some
+/// high-concurrency scenarios.
+static constexpr size_t MIN_RECORD_BUFFER_SIZE = 4 * 1024;  // 4KB
+
+/// The maximum size of the record buffer allocated by set_record_buffer().
+/// Having a bigger buffer than this does not seem to give noticeably better
+/// performance, and having a too big buffer has been seen to hurt performance
+/// in high-concurrency scenarios.
 static constexpr size_t MAX_RECORD_BUFFER_SIZE = 128 * 1024;  // 128KB
+
+/// How big a fraction of the estimated number of returned rows to make room
+/// for in the record buffer allocated by set_record_buffer(). The actual
+/// size of the buffer will be adjusted to a value between
+/// MIN_RECORD_BUFFER_SIZE and MAX_RECORD_BUFFER_SIZE if it falls outside of
+/// this range. If all rows can be accomodated with a much smaller buffer
+/// size than MIN_RECORD_BUFFER_SIZE, we only allocate the required size.
+///
+/// The idea behind using a fraction of the estimated number of rows, and not
+/// just allocate a buffer big enough to hold all returned rows if they fit
+/// within the maximum size, is that using big record buffers for small ranges
+/// have been seen to hurt performance in high-concurrency scenarios. So we want
+/// to pull the buffer size towards the minimum buffer size if the range is not
+/// that large, while still pulling the buffer size towards the maximum buffer
+/// size for large ranges and table scans.
+///
+/// The actual number is the result of an attempt to find the balance between
+/// the advantages of big buffers in scenarios with low concurrency and/or large
+/// ranges, and the disadvantages of big buffers in scenarios with high
+/// concurrency. Increasing it could improve the performance of some queries
+/// when the concurrency is low and hurt the performance if the concurrency is
+/// high, and reducing it could have the opposite effect.
+static constexpr double RECORD_BUFFER_FRACTION = 0.1f;
 
 string RefToString(const Index_lookup &ref, const KEY *key,
                    bool include_nulls) {
@@ -327,9 +364,9 @@ bool has_rollup_result(Item *item) {
   return false;
 }
 
-bool is_rollup_group_wrapper(Item *item) {
+bool is_rollup_group_wrapper(const Item *item) {
   return item->type() == Item::FUNC_ITEM &&
-         down_cast<Item_func *>(item)->functype() ==
+         down_cast<const Item_func *>(item)->functype() ==
              Item_func::ROLLUP_GROUP_ITEM_FUNC;
 }
 
@@ -675,8 +712,9 @@ bool set_record_buffer(TABLE *table, double expected_rows_to_fetch) {
     return false;
   }
 
-  ha_rows rows_in_buffer =
+  ha_rows expected_rows =
       static_cast<ha_rows>(std::ceil(expected_rows_to_fetch));
+  ha_rows rows_in_buffer = expected_rows;
 
   /*
     How much space do we need to allocate for each record? Enough to
@@ -686,13 +724,28 @@ bool set_record_buffer(TABLE *table, double expected_rows_to_fetch) {
   */
   const size_t record_size = record_prefix_size(table);
 
-  // Do not allocate a buffer whose total size exceeds MAX_RECORD_BUFFER_SIZE.
-  if (record_size > 0)
-    rows_in_buffer =
-        std::min<ha_rows>(MAX_RECORD_BUFFER_SIZE / record_size, rows_in_buffer);
+  if (record_size > 0) {
+    const ha_rows min_rows =
+        std::ceil(double{MIN_RECORD_BUFFER_SIZE} / record_size);
+    // If the expected rows to fetch can be accomodated with a
+    // lesser buffer size than MIN_RECORD_BUFFER_SIZE, we allocate
+    // only the required size.
+    if (expected_rows < min_rows) {
+      rows_in_buffer = expected_rows;
+    } else {
+      rows_in_buffer = std::ceil(rows_in_buffer * RECORD_BUFFER_FRACTION);
+      // Adjust the number of rows, if necessary, to fit within the
+      // minimum and maximum buffer size range.
+      const ha_rows local_max_rows = (MAX_RECORD_BUFFER_SIZE / record_size);
+      rows_in_buffer = std::clamp(rows_in_buffer, min_rows, local_max_rows);
+    }
+  }
 
-  // Do not allocate space for more rows than the handler asked for.
-  rows_in_buffer = std::min(rows_in_buffer, max_rows);
+  // After adjustments made above, we still need a minimum of 2 rows to
+  // use a record buffer.
+  if (rows_in_buffer <= 1) {
+    return false;
+  }
 
   const auto bufsize = Record_buffer::buffer_size(rows_in_buffer, record_size);
   const auto ptr = pointer_cast<uchar *>(current_thd->alloc(bufsize));
@@ -1521,6 +1574,10 @@ static void RecalculateTablePathCost(AccessPath *path,
       EstimateMaterializeCost(current_thd, path);
       break;
 
+    case AccessPath::WINDOW:
+      EstimateWindowCost(path);
+      break;
+
     default:
       assert(false);
   }
@@ -1547,6 +1604,7 @@ AccessPath *MoveCompositeIteratorsFromTablePath(
       case AccessPath::CONST_TABLE:
       case AccessPath::INDEX_SCAN:
       case AccessPath::INDEX_RANGE_SCAN:
+      case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
         // We found our real bottom.
         path->materialize().table_path = sub_path;
         if (explain) {
@@ -1607,6 +1665,9 @@ AccessPath *MoveCompositeIteratorsFromTablePath(
         bottom_of_table_path->materialize()
             .param->query_blocks[0]
             .subquery_path = path;
+        break;
+      case AccessPath::WINDOW:
+        bottom_of_table_path->window().child = path;
         break;
       default:
         assert(false);
@@ -3306,7 +3367,7 @@ AccessPath *JOIN::attach_access_paths_for_having_and_limit(AccessPath *path) {
     AccessPath *old_path = path;
     path = NewFilterAccessPath(thd, path, having_cond);
     CopyBasicProperties(*old_path, path);
-    if (thd->lex->using_hypergraph_optimizer) {
+    if (thd->lex->using_hypergraph_optimizer()) {
       // We cannot call EstimateFilterCost() in the pre-hypergraph optimizer,
       // as on repeated execution of a prepared query, the condition may contain
       // references to subqueries that are destroyed and not re-optimized yet.
@@ -3344,8 +3405,7 @@ void JOIN::create_access_paths_for_index_subquery() {
       path = NewMaterializedTableFunctionAccessPath(thd, first_qep_tab->table(),
                                                     tl->table_function, path);
     } else {
-      path = GetAccessPathForDerivedTable(thd, first_qep_tab,
-                                          first_qep_tab->access_path());
+      path = GetAccessPathForDerivedTable(thd, first_qep_tab, path);
     }
   }
 
@@ -3930,8 +3990,8 @@ static bool table_rec_cmp(TABLE *table) {
 */
 
 ulonglong unique_hash(const Field *field, ulonglong *hash_val) {
-  uint64 seed1 = 0, seed2 = 4;
-  ulonglong crc = *hash_val;
+  uint64_t seed1 = 0, seed2 = 4;
+  uint64_t crc = *hash_val;
 
   if (field->is_null()) {
     /*
@@ -3957,7 +4017,7 @@ ulonglong unique_hash(const Field *field, ulonglong *hash_val) {
     }
     field->charset()->coll->hash_sort(field->charset(), data_ptr,
                                       field->data_length(), &seed1, &seed2);
-    crc ^= seed1;
+    my_hash_combine(crc, seed1);
   } else {
     const uchar *pos = field->data_ptr();
     const uchar *end = pos + field->data_length();
@@ -4219,6 +4279,12 @@ static bool replace_embedded_rollup_references_with_tmp_fields(
         return {ReplaceResult::REPLACE, item_field};
       }
     }
+    // A const item that is part of group by and not found in
+    // select list will not be found in "fields" (It's not added
+    // as a hidden item).
+    if (unwrap_rollup_group(sub_item)->const_for_execution()) {
+      return {ReplaceResult::REPLACE, sub_item};
+    }
     assert(false);
     return {ReplaceResult::ERROR, nullptr};
   };
@@ -4323,8 +4389,13 @@ static Item_rollup_group_item *find_rollup_item_in_group_list(
   for (ORDER *group = query_block->group_list.first; group;
        group = group->next) {
     Item_rollup_group_item *rollup_item = group->rollup_item;
-    if (item->eq(rollup_item, /*binary_cmp=*/false)) {
-      return rollup_item;
+    // If we have duplicate fields in group by
+    // (E.g. GROUP BY f1,f1,f2), rollup_item is set only for
+    // the first field.
+    if (rollup_item != nullptr) {
+      if (item->eq(rollup_item, /*binary_cmp=*/false)) {
+        return rollup_item;
+      }
     }
   }
   return nullptr;

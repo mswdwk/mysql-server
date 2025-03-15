@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +32,7 @@
 #include <gmock/gmock-matchers.h>
 #include <google/protobuf/io/tokenizer.h>
 #include <google/protobuf/message.h>
+#include <google/protobuf/stubs/common.h>
 #include <google/protobuf/text_format.h>
 #include <gtest/gtest-param-test.h>
 #include <gtest/gtest.h>
@@ -62,6 +64,8 @@ using namespace std::string_literals;
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
 
+using ::testing::ElementsAre;
+
 static constexpr const std::string_view kDisabled{"DISABLED"};
 static constexpr const std::string_view kRequired{"REQUIRED"};
 static constexpr const std::string_view kPreferred{"PREFERRED"};
@@ -73,6 +77,50 @@ std::ostream &operator<<(std::ostream &os, MysqlError e) {
   return os;
 }
 
+/**
+ * convert a multi-resultset into a simple container which can be EXPECTed
+ * against.
+ */
+static std::vector<std::vector<std::vector<std::string>>> result_as_vector(
+    const MysqlClient::Statement::Result &results) {
+  std::vector<std::vector<std::vector<std::string>>> resultsets;
+
+  for (const auto &result : results) {
+    std::vector<std::vector<std::string>> res_;
+
+    const auto field_count = result.field_count();
+
+    for (const auto &row : result.rows()) {
+      std::vector<std::string> row_;
+      row_.reserve(field_count);
+
+      for (unsigned int ndx = 0; ndx < field_count; ++ndx) {
+        auto fld = row[ndx];
+
+        row_.emplace_back(fld == nullptr ? "<NULL>" : fld);
+      }
+
+      res_.push_back(std::move(row_));
+    }
+    resultsets.push_back(std::move(res_));
+  }
+
+  return resultsets;
+}
+
+static stdx::expected<std::vector<std::vector<std::string>>, MysqlError>
+query_one_result(MysqlClient &cli, std::string_view stmt) {
+  auto cmd_res = cli.query(stmt);
+  if (!cmd_res) return stdx::make_unexpected(cmd_res.error());
+
+  auto results = result_as_vector(*cmd_res);
+  if (results.size() != 1) {
+    return stdx::make_unexpected(MysqlError{1, "Too many results", "HY000"});
+  }
+
+  return results.front();
+}
+
 /*
  * collect parse errors into a string.
  *
@@ -80,15 +128,27 @@ std::ostream &operator<<(std::ostream &os, MysqlError e) {
  */
 class StringErrorCollector : public google::protobuf::io::ErrorCollector {
  public:
+#if (GOOGLE_PROTOBUF_VERSION >= 4024000)
+  void RecordError(int line, google::protobuf::io::ColumnNumber column,
+                   absl::string_view msg) override
+#else
   void AddError(int line, google::protobuf::io::ColumnNumber column,
-                const std::string &msg) override {
+                const std::string &msg) override
+#endif  // (GOOGLE_PROTOBUF_VERSION >= 4024000)
+  {
     std::ostringstream ss;
 
     ss << "ERROR: " << line << ":" << column << ": " << msg;
     lines_.push_back(ss.str());
   }
+#if (GOOGLE_PROTOBUF_VERSION >= 4024000)
+  void RecordWarning(int line, google::protobuf::io::ColumnNumber column,
+                     absl::string_view msg) override
+#else
   void AddWarning(int line, google::protobuf::io::ColumnNumber column,
-                  const std::string &msg) override {
+                  const std::string &msg) override
+#endif  // (GOOGLE_PROTOBUF_VERSION >= 4024000)
+  {
     std::ostringstream ss;
 
     ss << "WARN: " << line << ":" << column << ": " << msg;
@@ -234,6 +294,7 @@ class SharedServer {
             .spawner(mysqld.str())
             .wait_for_sync_point(ProcessManager::Spawner::SyncPoint::NONE)
             .spawn({
+                "--no-defaults",
                 "--initialize-insecure",
                 "--datadir=" + mysqld_dir_name(),
                 "--log-error=" + mysqld_dir_name() +
@@ -276,7 +337,7 @@ class SharedServer {
                                            static_cast<int>(0xc000013a)})
 #endif
             .spawn({
-                "--no-defaults-file",
+                "--no-defaults",
                 "--lc-messages-dir=" + lc_messages_dir.str(),
                 "--datadir=" + mysqld_dir_name(),
                 "--log-error=" + mysqld_dir_name() +
@@ -670,8 +731,6 @@ class ReuseConnectionTest
     // shared_server_ may be null if TestWithSharedServer::SetUpTestSuite threw?
     if (shared_server_ == nullptr || shared_server_->mysqld_failed_to_start()) {
       GTEST_SKIP() << "failed to start mysqld";
-    } else {
-      shared_server_->flush_prileges();
     }
   }
 
@@ -878,6 +937,9 @@ TEST_P(ReuseConnectionTest, classic_protocol_change_user_native) {
 }
 
 TEST_P(ReuseConnectionTest, classic_protocol_change_user_caching_sha2_empty) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   SCOPED_TRACE("// connecting to server");
   MysqlClient cli;
 
@@ -899,6 +961,9 @@ TEST_P(ReuseConnectionTest, classic_protocol_change_user_caching_sha2_empty) {
 }
 
 TEST_P(ReuseConnectionTest, classic_protocol_change_user_caching_sha2) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   SCOPED_TRACE("// connecting to server");
   MysqlClient cli;
 
@@ -1820,6 +1885,9 @@ TEST_P(ReuseConnectionTest, classic_protocol_native_user_with_pass) {
 //
 
 TEST_P(ReuseConnectionTest, classic_protocol_caching_sha2_password_with_pass) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   auto account = shared_server_->caching_sha2_password_account();
 
   std::string username(account.username);
@@ -1882,6 +1950,9 @@ TEST_P(ReuseConnectionTest, classic_protocol_caching_sha2_password_with_pass) {
 }
 
 TEST_P(ReuseConnectionTest, classic_protocol_caching_sha2_password_no_pass) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   auto account = shared_server_->caching_sha2_empty_password_account();
 
   std::string username(account.username);
@@ -1948,6 +2019,9 @@ TEST_P(ReuseConnectionTest,
   if (GetParam().client_ssl_mode == kRequired) {
     GTEST_SKIP() << "test requires plaintext connection.";
   }
+
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
 
   auto account = shared_server_->caching_sha2_single_use_password_account();
 
@@ -2304,7 +2378,7 @@ TEST_P(ReuseConnectionTest, x_protocol_crud_find) {
     EXPECT_EQ(exec_res->get_warnings(), xcl::XQuery_result::Warnings{});
     EXPECT_EQ(exec_res->has_resultset(), true);
 
-    auto row = exec_res->get_next_row();
+    const auto *row = exec_res->get_next_row();
     std::string string_v;
     ASSERT_TRUE(row->get_string(0, &string_v));
     // content is {_id: "0000027323879689"}
@@ -3723,6 +3797,9 @@ TEST_P(ReuseConnectionTest,
 
 TEST_P(ReuseConnectionTest,
        x_protocol_session_authenticate_start_caching_sha2_password_empty) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   SCOPED_TRACE("// connect");
   auto sess_res = xsess(GetParam());
   ASSERT_NO_ERROR(sess_res);
@@ -3748,6 +3825,9 @@ TEST_P(ReuseConnectionTest,
 
 TEST_P(ReuseConnectionTest,
        x_protocol_session_authenticate_start_caching_sha2_password) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   SCOPED_TRACE("// connect");
   auto sess_res = xsess(GetParam());
   ASSERT_NO_ERROR(sess_res);
@@ -3811,6 +3891,9 @@ TEST_P(ReuseConnectionTest, x_protocol_connect_native) {
 }
 
 TEST_P(ReuseConnectionTest, x_protocol_connect_sha256_password_empty) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   SCOPED_TRACE("// setup");
   auto sess = xcl::create_session();
   auto account = shared_server_->sha256_empty_password_account();
@@ -3834,6 +3917,9 @@ TEST_P(ReuseConnectionTest, x_protocol_connect_sha256_password_empty) {
 }
 
 TEST_P(ReuseConnectionTest, x_protocol_connect_sha256_password) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   auto sess = xcl::create_session();
   auto account = shared_server_->sha256_password_account();
 
@@ -3856,6 +3942,9 @@ TEST_P(ReuseConnectionTest, x_protocol_connect_sha256_password) {
 }
 
 TEST_P(ReuseConnectionTest, x_protocol_connect_caching_sha2_password_empty) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   SCOPED_TRACE("// setup");
 
   auto sess = xcl::create_session();
@@ -3888,6 +3977,9 @@ TEST_P(ReuseConnectionTest, x_protocol_connect_caching_sha2_password_empty) {
 }
 
 TEST_P(ReuseConnectionTest, x_protocol_connect_caching_sha2_password) {
+  // reset auth-cache for caching-sha2-password
+  shared_server_->flush_prileges();
+
   SCOPED_TRACE("// setup");
   auto sess = xcl::create_session();
 
@@ -3915,6 +4007,29 @@ TEST_P(ReuseConnectionTest, x_protocol_connect_caching_sha2_password) {
     } else {
       ASSERT_EQ(xerr.error(), 0) << xerr;
     }
+  }
+}
+
+TEST_P(ReuseConnectionTest, classic_protocol_charset_after_connect) {
+  MysqlClient cli;
+
+  auto account = shared_server_->native_empty_password_account();
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  cli.set_option(MysqlClient::CharsetName("latin1"));
+
+  ASSERT_NO_ERROR(
+      cli.connect(shared_router_->host(), shared_router_->port(GetParam())));
+
+  {
+    auto cmd_res = query_one_result(
+        cli, "select @@character_set_client, @@collation_connection");
+    ASSERT_NO_ERROR(cmd_res);
+
+    EXPECT_THAT(*cmd_res,
+                ElementsAre(ElementsAre("latin1", "latin1_swedish_ci")));
   }
 }
 

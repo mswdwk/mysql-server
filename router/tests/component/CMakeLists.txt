@@ -1,15 +1,16 @@
-# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,6 +20,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+
+IF(NOT TARGET mysql_server_mock)
+  RETURN()
+ENDIF()
 
 ADD_HARNESS_PLUGIN(routertestplugin_logger NO_INSTALL
   DESTINATION harness
@@ -83,6 +88,12 @@ FOREACH(test_file
     test_stacktrace.cc
     test_destination_status.cc
     )
+# Downgrade from error to warning.
+MY_CHECK_CXX_COMPILER_WARNING("-Werror=dangling-reference" HAS_WARN_FLAG)
+IF(HAS_WARN_FLAG)
+  ADD_COMPILE_FLAGS(test_routing_strategy.cc COMPILE_FLAGS "${HAS_WARN_FLAG}")
+ENDIF()
+
 add_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   MODULE "component"
   INCLUDE_DIRS
@@ -99,7 +110,7 @@ add_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   mysql_protocol
   mysqlxclient_lite
   mysqlxmessages_lite
-  ${PROTOBUF_LITE_LIBRARY}
+  ext::libprotobuf-lite
 
   DEPENDS
   http_auth_backend
@@ -135,7 +146,7 @@ add_router_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   LIB_DEPENDS
   mysqlxclient_lite
   mysqlxmessages_lite
-  ${PROTOBUF_LITE_LIBRARY}
+  ext::libprotobuf-lite
 
   DEPENDS
   http_auth_backend

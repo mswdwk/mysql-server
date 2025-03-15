@@ -518,7 +518,7 @@ id	f1
 18	[8, 4, 3, 5]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[4,3]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	15	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[4, 3]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
@@ -527,7 +527,7 @@ id	f1
 6	[5, 6, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	14	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[5, 7]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
@@ -543,7 +543,7 @@ id	f1
 19	[9, 2, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	9	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	1	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[7]')
 set @save_opt=@@optimizer_switch;
@@ -558,7 +558,7 @@ id	f1
 18	[8, 4, 3, 5]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[4,3]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	15	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[4, 3]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
@@ -567,7 +567,7 @@ id	f1
 6	[5, 6, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	14	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[5, 7]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
@@ -583,7 +583,7 @@ id	f1
 19	[9, 2, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	9	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	1	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[7]')
 select * from t1 force index(i1) where 99 member of  (f1->"$[*]");
@@ -3282,4 +3282,140 @@ EXPLAIN
     -> Index range scan on t using functional_index_2 over ('2021-01-01' MEMBER OF (json_extract(doc,_utf8mb4'$[*].date'))) OR ('2020-01-01' MEMBER OF (json_extract(doc,_utf8mb4'$[*].date')))  (cost=1.1 rows=2)
 
 DROP TABLE t;
+#
+# Bug#35012146 Multivalued index creation results in partial result for
+# query with ORDER BY DESC
+#
+CREATE TABLE test (id INT NOT NULL, json_value JSON, PRIMARY KEY (id),
+INDEX multivalued_index ((CAST(json_value->'$' AS UNSIGNED ARRAY))));
+INSERT INTO test VALUES (1,'[1, 2, 3, 4]');
+INSERT INTO test VALUES (2,'[4, 5, 6, 7]');
+INSERT INTO test VALUES (3,'[7, 8, 9, 1]');
+INSERT INTO test VALUES (4,'[9, 1, 2, 3]');
+INSERT INTO test VALUES (5,'[3, 4, 5, 6]');
+INSERT INTO test VALUES (6,'[6, 7, 8, 9]');
+ANALYZE TABLE test;
+Table	Op	Msg_type	Msg_text
+test.test	analyze	status	OK
+SELECT id, json_value FROM test WHERE 4 MEMBER OF (json_value->'$') ORDER BY id;
+id	json_value
+1	[1, 2, 3, 4]
+2	[4, 5, 6, 7]
+5	[3, 4, 5, 6]
+EXPLAIN SELECT id, json_value FROM test WHERE 4 MEMBER OF (json_value->'$')
+ORDER BY id DESC;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	test	NULL	ref	multivalued_index	multivalued_index	9	const	3	100.00	Using where; Backward index scan
+Warnings:
+Note	1003	/* select#1 */ select `test`.`test`.`id` AS `id`,`test`.`test`.`json_value` AS `json_value` from `test`.`test` where json'4' member of (cast(json_extract(`json_value`,_utf8mb4'$') as unsigned array)) order by `test`.`test`.`id` desc
+EXPLAIN ANALYZE SELECT id, json_value FROM test WHERE
+4 MEMBER OF (json_value->'$') ORDER BY id DESC;
+EXPLAIN
+-> Filter: json'4' member of (cast(json_extract(`json_value`,_utf8mb4'$') as unsigned array))  (cost=0.8 rows=3) (actual rows=3 loops=1)
+    -> Index lookup on test using multivalued_index (cast(json_extract(`json_value`,_utf8mb4'$') as unsigned array)=json'4') (reverse)  (cost=0.8 rows=3) (actual rows=3 loops=1)
+
+SELECT id, json_value FROM test WHERE 4 MEMBER OF (json_value->'$')
+ORDER BY id DESC;
+id	json_value
+5	[3, 4, 5, 6]
+2	[4, 5, 6, 7]
+1	[1, 2, 3, 4]
+DROP TABLE test;
+CREATE TABLE test (id INT PRIMARY KEY, j JSON,
+INDEX multivalued_index ((CAST(j->'$[*]' AS CHAR(10) ARRAY))));
+INSERT INTO test VALUES (1, '["10"]'),
+(2, '["9"]'),
+(3, '["8", "10", "25"]'),
+(4, '["7", "15" ,"3", "27"]'),
+(5, '["6", "3", "10", "95"]'),
+(6, '["5"]'),
+(7, '["4"]'),
+(8, '["3"]'),
+(9, '["2"]'),
+(10, '["1"]');
+ANALYZE TABLE test;
+Table	Op	Msg_type	Msg_text
+test.test	analyze	status	OK
+EXPLAIN ANALYZE SELECT * FROM test WHERE "10" MEMBER OF (j->'$[*]')
+ORDER BY id DESC;
+EXPLAIN
+-> Filter: json'"10"' member of (cast(json_extract(j,_utf8mb4'$[*]') as char(10) array))  (cost=0.8 rows=3) (actual rows=3 loops=1)
+    -> Index lookup on test using multivalued_index (cast(json_extract(j,_utf8mb4'$[*]') as char(10) array)=json'"10"') (reverse)  (cost=0.8 rows=3) (actual rows=3 loops=1)
+
+SELECT * FROM test WHERE "10" MEMBER OF (j->'$[*]') ORDER BY id DESC;
+id	j
+5	["6", "3", "10", "95"]
+3	["8", "10", "25"]
+1	["10"]
+EXPLAIN ANALYZE SELECT * FROM test WHERE "3" MEMBER OF (j->'$[*]')
+ORDER BY id DESC;
+EXPLAIN
+-> Filter: json'"3"' member of (cast(json_extract(j,_utf8mb4'$[*]') as char(10) array))  (cost=0.8 rows=3) (actual rows=3 loops=1)
+    -> Index lookup on test using multivalued_index (cast(json_extract(j,_utf8mb4'$[*]') as char(10) array)=json'"3"') (reverse)  (cost=0.8 rows=3) (actual rows=3 loops=1)
+
+SELECT * FROM test WHERE "3" MEMBER OF (j->'$[*]') ORDER BY id DESC;
+id	j
+8	["3"]
+5	["6", "3", "10", "95"]
+4	["7", "15", "3", "27"]
+DROP TABLE test;
 # restart:
+#
+# Bug#33334911 - Multi-valued index performance is too slow
+# (Access too many rows than required)
+#
+CREATE TABLE t1 (
+id INT NOT NULL,
+f1 enum('T1','T2','T3') NOT NULL,
+f2 INT NOT NULL,
+json_value json DEFAULT (json_array()),
+PRIMARY KEY (id),
+KEY idx (f1 ,(CAST(json_extract(json_value,_utf8mb4'$') AS UNSIGNED ARRAY)), f2)
+);
+INSERT INTO t1 VALUES (1, 'T2', 15, '[1, 3, 5, 7]');
+INSERT INTO t1 VALUES (2, 'T2', 25, '[10, 20, 30, 40]');
+INSERT INTO t1 VALUES (3, 'T2', 35, '[15, 25, 35, 45]');
+INSERT INTO t1 VALUES (4, 'T2', 45, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (5, 'T2', 55, '[120, 220, 320, 420]');
+INSERT INTO t1 VALUES (6, 'T2', 65, '[140, 240, 340, 440]');
+INSERT INTO t1 VALUES (7, 'T2', 9, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (8, 'T2', 9, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (9, 'T2', 9, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (10, 'T2', 9, '[100, 200, 300, 400]');
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+EXPLAIN SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	range	idx	idx	14	NULL	1	100.00	Using where
+Warnings:
+Note	1003	/* select#1 */ select count(0) AS `COUNT(*)` from `test`.`t1` where ((`test`.`t1`.`f1` = 'T2') and json_overlaps(cast(json_extract(`json_value`,_utf8mb4'$') as unsigned array),json'[100]') and (`test`.`t1`.`f2` >= 10))
+FLUSH STATUS;
+SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+COUNT(*)
+1
+SHOW STATUS LIKE 'Handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	1
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+SET @save_opt=@@optimizer_switch;
+SET @@optimizer_switch="mrr_cost_based=off";
+EXPLAIN SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	range	idx	idx	14	NULL	1	100.00	Using where
+Warnings:
+Note	1003	/* select#1 */ select count(0) AS `COUNT(*)` from `test`.`t1` where ((`test`.`t1`.`f1` = 'T2') and json_overlaps(cast(json_extract(`json_value`,_utf8mb4'$') as unsigned array),json'[100]') and (`test`.`t1`.`f2` >= 10))
+SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+COUNT(*)
+1
+SET @@optimizer_switch=@save_opt;
+DROP TABLE t1;

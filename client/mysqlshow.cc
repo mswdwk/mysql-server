@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -613,9 +614,15 @@ static int list_tables(MYSQL *mysql, const char *db, const char *table) {
   }
 
   print_trailer(
-      head_length, (opt_table_type ? 10 : opt_verbose > 0 ? 8 : 0),
+      head_length,
+      (opt_table_type    ? 10
+       : opt_verbose > 0 ? 8
+                         : 0),
       (opt_table_type ? (opt_verbose > 0 ? 8 : 0) : (opt_verbose > 1 ? 10 : 0)),
-      !opt_table_type ? 0 : opt_verbose > 1 ? 10 : 0, 0);
+      !opt_table_type   ? 0
+      : opt_verbose > 1 ? 10
+                        : 0,
+      0);
 
   if (counter && opt_verbose)
     printf("%u row%s in set.\n\n", counter, (counter > 1) ? "s" : "");

@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2024, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -143,10 +144,10 @@ void meb_print_page_header(const page_t *page) {
 }
 #endif /* UNIV_HOTBACKUP */
 
-//#ifndef UNIV_HOTBACKUP
+// #ifndef UNIV_HOTBACKUP
 PSI_memory_key mem_log_recv_page_hash_key;
 PSI_memory_key mem_log_recv_space_hash_key;
-//#endif /* !UNIV_HOTBACKUP */
+// #endif /* !UNIV_HOTBACKUP */
 
 /** true when recv_init_crash_recovery() has been called. */
 bool recv_needed_recovery;
@@ -219,13 +220,14 @@ static bool recv_writer_is_active() {
 @param[in,out]  buf             buffer where to read
 @param[in]      start_lsn       read area start
 @param[in]      end_lsn         read area end
-@return lsn up to which data was available on disk (ideally end_lsn) */
+@return lsn up to which data was available on disk (ideally end_lsn)
+or zero in case of error */
 static lsn_t recv_read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
                                lsn_t end_lsn);
 
 /** Initialize crash recovery environment. Can be called iff
 recv_needed_recovery == false. */
-static dberr_t recv_init_crash_recovery();
+static void recv_init_crash_recovery();
 #endif /* !UNIV_HOTBACKUP */
 
 /** Calculates the new value for lsn when more data is added to the log.
@@ -302,22 +304,30 @@ byte *MetadataRecover::parseMetadataLog(table_id_t id, uint64_t version,
   ut_ad(dict_persist->persisters != nullptr);
 
   Persister *persister = dict_persist->persisters->get(type);
+  if (persister == nullptr) {
+    recv_sys->found_corrupt_log = true;
+    return ptr;
+  }
+
+  ptr++;
+
   PersistentTableMetadata *metadata = getMetadata(id);
 
+  PersistentTableMetadata new_entry{id, version};
   bool corrupt;
-  ulint consumed = persister->read(*metadata, ptr, end - ptr, &corrupt);
+  ulint consumed = persister->read(new_entry, ptr, end - ptr, &corrupt);
 
   if (corrupt) {
     recv_sys->found_corrupt_log = true;
-  } else if (consumed != 0) {
-    metadata->set_version(version);
+    return ptr + consumed;
   }
 
   if (consumed == 0) {
     return nullptr;
-  } else {
-    return ptr + consumed;
   }
+
+  persister->aggregate(*metadata, new_entry);
+  return ptr + consumed;
 }
 
 /** Creates the recovery system. */
@@ -2778,8 +2788,7 @@ void recv_recover_page_func(
 
   /* Make sure that committing mtr does not change the modification
   LSN values of page */
-
-  mtr.discard_modifications();
+  ut_a(mtr.get_log_mode() == MTR_LOG_NONE);
 
   mtr_commit(&mtr);
 
@@ -3020,20 +3029,14 @@ static bool recv_single_rec(byte *ptr, byte *end_ptr) {
 
     default:
 
-      if (recv_recovery_on) {
+      if (recv_recovery_on
 #ifndef UNIV_HOTBACKUP
-        if (space_id == TRX_SYS_SPACE ||
-            fil_tablespace_lookup_for_recovery(space_id)) {
+          && (space_id == TRX_SYS_SPACE ||
+              fil_tablespace_lookup_for_recovery(space_id))
 #endif /* !UNIV_HOTBACKUP */
-
-          recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
-                                 old_lsn, recv_sys->recovered_lsn);
-
-#ifndef UNIV_HOTBACKUP
-        } else {
-          recv_sys->missing_ids.insert(space_id);
-        }
-#endif /* !UNIV_HOTBACKUP */
+      ) {
+        recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
+                               old_lsn, recv_sys->recovered_lsn);
       }
 
       [[fallthrough]];
@@ -3203,20 +3206,15 @@ static bool recv_multi_rec(byte *ptr, byte *end_ptr) {
           break;
         }
 
-        if (recv_recovery_on) {
+        if (recv_recovery_on
 #ifndef UNIV_HOTBACKUP
-          if (space_id == TRX_SYS_SPACE ||
-              fil_tablespace_lookup_for_recovery(space_id)) {
+            && (space_id == TRX_SYS_SPACE ||
+                fil_tablespace_lookup_for_recovery(space_id))
 #endif /* !UNIV_HOTBACKUP */
+        ) {
 
-            recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
-                                   old_lsn, new_recovered_lsn);
-
-#ifndef UNIV_HOTBACKUP
-          } else {
-            recv_sys->missing_ids.insert(space_id);
-          }
-#endif /* !UNIV_HOTBACKUP */
+          recv_add_to_hash_table(type, space_id, page_no, body, ptr + len,
+                                 old_lsn, new_recovered_lsn);
         }
     }
 
@@ -3350,7 +3348,6 @@ automatically when the hash table becomes full.
 @param[in]      len             buffer length
 @param[in]      start_lsn       buffer start lsn
 @param[out]  read_upto_lsn  scanning succeeded up to this lsn
-@param[out]  err             DB_SUCCESS when no dblwr corruptions.
 @return true if not able to scan any more in this log */
 #ifndef UNIV_HOTBACKUP
 static bool recv_scan_log_recs(log_t &log,
@@ -3358,13 +3355,11 @@ static bool recv_scan_log_recs(log_t &log,
 bool meb_scan_log_recs(
 #endif /* !UNIV_HOTBACKUP */
                                size_t max_memory, const byte *buf, size_t len,
-                               lsn_t start_lsn, lsn_t *read_upto_lsn,
-                               dberr_t &err) {
+                               lsn_t start_lsn, lsn_t *read_upto_lsn) {
   const byte *log_block = buf;
   lsn_t scanned_lsn = start_lsn;
   bool finished = false;
   bool more_data = false;
-  err = DB_SUCCESS;
 
   ut_ad(start_lsn % OS_FILE_LOG_BLOCK_SIZE == 0);
   ut_ad(len % OS_FILE_LOG_BLOCK_SIZE == 0);
@@ -3487,10 +3482,7 @@ bool meb_scan_log_recs(
 
         ib::info(ER_IB_MSG_722, ulonglong{recv_sys->scanned_lsn});
 
-        err = recv_init_crash_recovery();
-        if (err != DB_SUCCESS) {
-          return true;
-        }
+        recv_init_crash_recovery();
       }
 #endif /* !UNIV_HOTBACKUP */
 
@@ -3617,9 +3609,30 @@ static lsn_t recv_read_log_seg(log_t &log, byte *buf, lsn_t start_lsn,
 
     ++log.n_log_ios;
 
-    const dberr_t err =
-        log_data_blocks_read(file_handle, source_offset, len, buf);
-    ut_a(err == DB_SUCCESS);
+    dberr_t err = log_data_blocks_read(file_handle, source_offset, len, buf);
+
+    if (err == DB_UNSUPPORTED) {
+      /* The log block may be encrypted, read and update the log_sys */
+      err = log_encryption_read(log);
+      if (err != DB_SUCCESS) {
+        return 0;
+      }
+
+      /* Try again */
+      err = log_data_blocks_read(file_handle, source_offset, len, buf);
+      switch (err) {
+        case DB_SUCCESS:
+          break;
+
+        case DB_UNSUPPORTED:
+          ib::error(ER_IB_MSG_CANT_DECRYPT_REDO_LOG, ulonglong{source_offset},
+                    file_handle.file_path().c_str());
+          return 0;
+
+        default:
+          return 0;
+      }
+    }
 
     start_lsn += len;
     buf += len;
@@ -3656,10 +3669,10 @@ Parses and hashes the log records if new data found.
                                         an mtr which we can ignore, as it is
                                         already applied to tablespace files)
                                         until which all redo log has been
-                                        scanned */
+                                        scanned
+@return DB_SUCCESS if successfull */
 static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn) {
   mutex_enter(&recv_sys->mutex);
-
   recv_sys->len = 0;
   recv_sys->recovered_offset = 0;
   recv_sys->n_addrs = 0;
@@ -3704,20 +3717,18 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn) {
     const lsn_t end_lsn =
         recv_read_log_seg(log, log.buf, start_lsn, start_lsn + RECV_SCAN_SIZE);
 
+    if (end_lsn == 0) {
+      return DB_ERROR;
+    }
+
     if (end_lsn == start_lsn) {
       /* This could happen if we crashed just after completing file,
       and before next file has been successfully created. */
       break;
     }
 
-    dberr_t err;
-
     finished = recv_scan_log_recs(log, max_mem, log.buf, end_lsn - start_lsn,
-                                  start_lsn, &log.m_scanned_lsn, err);
-
-    if (err != DB_SUCCESS) {
-      return err;
-    }
+                                  start_lsn, &log.m_scanned_lsn);
 
     start_lsn = end_lsn;
   }
@@ -3728,7 +3739,7 @@ static dberr_t recv_recovery_begin(log_t &log, const lsn_t checkpoint_lsn) {
 
 /** Initialize crash recovery environment. Can be called iff
 recv_needed_recovery == false. */
-static dberr_t recv_init_crash_recovery() {
+static void recv_init_crash_recovery() {
   ut_ad(!srv_read_only_mode);
   ut_a(!recv_needed_recovery);
 
@@ -3737,7 +3748,7 @@ static dberr_t recv_init_crash_recovery() {
   ib::info(ER_IB_MSG_726);
   ib::info(ER_IB_MSG_727);
 
-  dberr_t err = recv_sys->dblwr->recover();
+  recv_sys->dblwr->recover();
 
   if (srv_force_recovery < SRV_FORCE_NO_LOG_REDO) {
     /* Spawn the background thread to flush dirty pages
@@ -3748,8 +3759,6 @@ static dberr_t recv_init_crash_recovery() {
 
     srv_threads.m_recv_writer.start();
   }
-
-  return err;
 }
 #endif /* !UNIV_HOTBACKUP */
 
@@ -3822,12 +3831,6 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
 
   ut_a(checkpoint_lsn == checkpoint_header.m_checkpoint_lsn);
 
-  /* Read the encryption header to get the encryption information. */
-  err = log_encryption_read(log);
-  if (err != DB_SUCCESS) {
-    return DB_ERROR;
-  }
-
   /* Start reading the log from the checkpoint LSN up. */
 
   ut_ad(RECV_SCAN_SIZE <= log.buf_size);
@@ -3854,10 +3857,7 @@ dberr_t recv_recovery_from_checkpoint_start(log_t &log, lsn_t flush_lsn) {
         return DB_ERROR;
       }
 
-      err = recv_init_crash_recovery();
-      if (err != DB_SUCCESS) {
-        return err;
-      }
+      recv_init_crash_recovery();
     }
   }
 

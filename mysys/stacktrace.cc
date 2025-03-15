@@ -1,15 +1,16 @@
-/* Copyright (c) 2001, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2001, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -38,8 +39,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-#ifdef __linux__
-#include <syscall.h>
+#include <cstdint>
+#include <string_view>
+#if defined(__linux__) || defined(__sun) || defined(__FreeBSD__)
+#include <sys/syscall.h>
+#ifdef HAVE_EXT_BACKTRACE
+#include <backtrace/stacktrace.hpp>
+#endif
 #endif
 #include <time.h>
 
@@ -189,7 +195,48 @@ void my_safe_puts_stderr(const char *val, size_t max_len) {
   my_safe_printf_stderr("%s", "\n");
 }
 
-#if defined(HAVE_BACKTRACE)
+#ifdef HAVE_EXT_BACKTRACE
+void my_print_stacktrace(const uchar *stack_bottom, ulong thread_stack) {
+  my_safe_printf_stderr("stack_bottom = %p thread_stack 0x%lx\n", stack_bottom,
+                        thread_stack);
+
+  struct cookie_t {
+    int index;
+  };
+  auto print_callback = [](void *cookie, uintptr_t pc, const char *filename,
+                           int lineno, const char *function) {
+    auto idx = static_cast<cookie_t *>(cookie)->index++;
+    if (filename != nullptr) {
+      std::string_view filename_sv{filename};
+      constexpr std::string_view parent_dir{"../"};
+      if (auto pos = filename_sv.rfind(parent_dir);
+          pos != std::string_view::npos) {
+        filename_sv.remove_prefix(pos + std::size(parent_dir));
+      }
+      constexpr std::string_view mysql_dir{"mysql/"};
+      if (auto pos = filename_sv.find(mysql_dir);
+          pos != std::string_view::npos) {
+        filename_sv.remove_prefix(pos + std::size(mysql_dir));
+      }
+      my_safe_printf_stderr(" #%d 0x%lx %s at %s:%d\n", idx, (unsigned long)pc,
+                            function == nullptr ? "<unknown>" : function,
+                            std::data(filename_sv), lineno);
+    } else {
+      my_safe_printf_stderr(" #%d 0x%lx %s\n", idx, (unsigned long)pc,
+                            function == nullptr ? "<unknown>" : function);
+    }
+
+    return 0;
+  };
+  auto error_callback = [](void *, const char *msg, int errnum) {
+    my_safe_printf_stderr("libbacktrace: %s", msg);
+    if (errnum > 0) my_safe_printf_stderr(": %d", errnum);
+    my_safe_printf_stderr("\n");
+  };
+  cookie_t cookie{.index = 0};
+  stacktrace::full(1, print_callback, error_callback, &cookie);
+}
+#elif defined(HAVE_BACKTRACE)
 
 #ifdef HAVE_ABI_CXA_DEMANGLE
 
@@ -217,7 +264,7 @@ static bool my_demangle_symbol(char *line) {
     }
   }
   if (demangled) my_safe_printf_stderr("%s %s %s\n", line, demangled, end + 1);
-#else  // !__APPLE__
+#else             // !__APPLE__
   char *begin = strchr(line, '(');
   char *end = begin ? strchr(begin, '+') : nullptr;
 
@@ -269,7 +316,6 @@ void my_print_stacktrace(const uchar *stack_bottom, ulong thread_stack) {
     if (demangled) free(demangled);
   }
 #endif
-
   void *addrs[128];
   char **strings = nullptr;
   int n = backtrace(addrs, array_elements(addrs));
@@ -285,8 +331,7 @@ void my_print_stacktrace(const uchar *stack_bottom, ulong thread_stack) {
     backtrace_symbols_fd(addrs, n, fileno(stderr));
   }
 }
-
-#endif /* HAVE_BACKTRACE */
+#endif /* HAVE_EXT_BACKTRACE || HAVE_BACKTRACE */
 #endif /* HAVE_STACKTRACE */
 
 /* Produce a core for the thread */

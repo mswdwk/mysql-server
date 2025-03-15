@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -1392,6 +1393,30 @@ static Surrounding_context qt2sc(Query_term_type qtt) {
   return SC_TOP;
 }
 
+/// Append the children of 'lower' to those of 'setop'.  To avoid excessive
+/// space usage of a large number of similar set ops: instead of the "obvious"
+/// method of copying the operands of the child's array to the parent's array,
+/// we may use the (possibly much) larger lower setop's child array as a basis,
+/// inserting setop's childen at the front and then std::move'ing that (now
+/// discarded) array to be setop's child array.  This makes the space
+/// allocation ~= linear instead of O(N*N/2) in the worst case (N: # of set
+/// operations).
+void PT_set_operation::merge_children(Query_term_set_op *setop,
+                                      Query_term_set_op *lower) {
+  if (lower->m_children.size() <= setop->m_children.size()) {
+    for (auto child : lower->m_children) {
+      setop->m_children.push_back(child);
+    }
+  } else {
+    const size_t lim = setop->m_children.size() - 1;
+    for (size_t i = 0; i < setop->m_children.size(); ++i) {
+      lower->m_children.push_front(setop->m_children[lim - i]);
+    }
+    setop->m_children = std::move(lower->m_children);
+    // lower->m_children is now empty.
+  }
+}
+
 /**
   Possibly merge lower syntactic levels of set operations (UNION, INTERSECT and
   EXCEPT) into setop, and set new last DISTINCT index for setop. We only ever
@@ -1554,8 +1579,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
         // distinct
         last_distinct = count + lower->m_children.size() - 1;
         count = count + lower->m_children.size();
-        // fold in children
-        for (auto child : lower->m_children) setop->m_children.push_back(child);
+        merge_children(setop, lower);
       } else {
         // similar kind of set operation, but contains limit, so do not merge
         count++;
@@ -1594,8 +1618,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
             }
             last_distinct = count + lower->m_last_distinct;
             count = count + lower->m_children.size();
-            for (auto child : lower->m_children)
-              setop->m_children.push_back(child);
+            merge_children(setop, lower);
           }
         } else {
           // upper and lower level are both ALL, so ok to merge, unless we have
@@ -1606,8 +1629,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
               first_distinct = count + lower->m_first_distinct;
             }
             count = count + lower->m_children.size();
-            for (auto child : lower->m_children)
-              setop->m_children.push_back(child);
+            merge_children(setop, lower);
           } else {
             // do not merge INTERSECT ALL: the execution time logic can only
             // handle binary INTERSECT ALL.
@@ -1626,7 +1648,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
           first_distinct = count + lower->m_first_distinct;
         }
         count = count + lower->m_children.size();
-        for (auto child : lower->m_children) setop->m_children.push_back(child);
+        merge_children(setop, lower);
       } else {
         // do not merge
         count++;
@@ -1646,13 +1668,16 @@ bool PT_set_operation::contextualize_setop(Parse_context *pc,
   pc->m_stack.push_back(QueryLevel(pc->mem_root, context));
   if (super::contextualize(pc)) return true;
 
-  if (m_lhs->contextualize(pc)) return true;
+  if (m_list[0]->contextualize(pc)) return true;
 
-  pc->select = pc->thd->lex->new_set_operation_query(pc->select);
-
-  if (pc->select == nullptr || m_rhs->contextualize(pc)) return true;
-
-  pc->thd->lex->pop_context();
+  List_iterator<PT_query_expression_body> it(m_list);
+  PT_query_expression_body *elt;
+  it++;  // skip first
+  while ((elt = it++)) {
+    pc->select = pc->thd->lex->new_set_operation_query(pc->select);
+    if (pc->select == nullptr || elt->contextualize(pc)) return true;
+    pc->thd->lex->pop_context();
+  }
 
   QueryLevel ql = pc->m_stack.back();
   pc->m_stack.pop_back();
@@ -1674,6 +1699,7 @@ bool PT_set_operation::contextualize_setop(Parse_context *pc,
   if (setop == nullptr) return true;
 
   merge_descendants(pc, setop, ql);
+  setop->label_children();
 
   Query_expression *qe = pc->select->master_query_expression();
   if (setop->set_block(qe->create_post_processing_block(setop))) return true;
@@ -1852,9 +1878,10 @@ bool PT_foreign_key_definition::contextualize(Table_ddl_parse_context *pc) {
     is used. If both are missing name of generated supporting index is
     automatically produced.
   */
-  const LEX_CSTRING key_name = to_lex_cstring(
-      m_constraint_name.str ? m_constraint_name
-                            : m_key_name.str ? m_key_name : NULL_STR);
+  const LEX_CSTRING key_name =
+      to_lex_cstring(m_constraint_name.str ? m_constraint_name
+                     : m_key_name.str      ? m_key_name
+                                           : NULL_STR);
 
   if (key_name.str && check_string_char_length(key_name, "", NAME_CHAR_LEN,
                                                system_charset_info, true)) {
@@ -4089,7 +4116,7 @@ bool PT_subquery::contextualize(Parse_context *pc) {
   if (super::contextualize(pc)) return true;
 
   LEX *lex = pc->thd->lex;
-  if (!lex->expr_allows_subselect || lex->sql_command == SQLCOM_PURGE) {
+  if (!lex->expr_allows_subquery || lex->sql_command == SQLCOM_PURGE) {
     error(pc, pos);
     return true;
   }

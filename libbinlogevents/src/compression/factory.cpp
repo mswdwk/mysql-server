@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,40 +29,30 @@
 #include <my_byteorder.h>
 #include <algorithm>
 
-namespace binary_log {
-namespace transaction {
-namespace compression {
+namespace binary_log::transaction::compression {
 
 std::unique_ptr<Compressor> Factory::build_compressor(type t) {
-  std::unique_ptr<Compressor> res{nullptr};
   switch (t) {
     case ZSTD:
-      res = std::make_unique<Zstd_comp>();
-      break;
+      return std::make_unique<Zstd_comp>();
     case NONE:
-      res = std::make_unique<None_comp>();
-      break;
+      return std::make_unique<None_comp>();
     default:
       break;
   }
-  return res;
+  return std::unique_ptr<Compressor>();
 }
 
 std::unique_ptr<Decompressor> Factory::build_decompressor(type t) {
-  std::unique_ptr<Decompressor> res{nullptr};
   switch (t) {
     case ZSTD:
-      res = std::make_unique<Zstd_dec>();
-      break;
+      return std::make_unique<Zstd_dec>();
     case NONE:
-      res = std::make_unique<None_dec>();
-      break;
+      return std::make_unique<None_dec>();
     default:
       break;
   }
-  return res;
+  return std::unique_ptr<Decompressor>();
 }
 
-}  // namespace compression
-}  // namespace transaction
-}  // namespace binary_log
+}  // namespace binary_log::transaction::compression

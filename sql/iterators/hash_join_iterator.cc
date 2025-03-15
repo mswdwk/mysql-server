@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,17 +26,18 @@
 #include <assert.h>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include "extra/robin-hood-hashing/robin_hood.h"
 #include "field_types.h"
 #include "my_alloc.h"
 #include "my_bit.h"
-#include "my_xxhash.h"
-
 #include "my_inttypes.h"
 #include "my_sys.h"
+#include "my_xxhash.h"
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysqld_error.h"
 #include "sql/item.h"
@@ -47,9 +49,6 @@
 #include "sql/sql_list.h"
 #include "sql/system_variables.h"
 #include "sql/table.h"
-#include "template_utils.h"
-
-class JOIN;
 
 using hash_join_buffer::LoadBufferRowIntoTableBuffers;
 using hash_join_buffer::LoadImmutableStringIntoTableBuffers;
@@ -153,7 +152,7 @@ bool HashJoinIterator::Init() {
   //
   // Note that this only ever happens in the hypergraph optimizer; see comments
   // in CreateIteratorFromAccessPath().
-  if (m_row_buffer.inited() &&
+  if (m_row_buffer.Initialized() &&
       (m_hash_join_type == HashJoinType::IN_MEMORY ||
        (m_hash_join_type == HashJoinType::SPILL_TO_DISK &&
         m_chunk_files_on_disk.empty())) &&
@@ -850,11 +849,8 @@ void HashJoinIterator::LookupProbeRowInHashTable() {
   if (m_join_conditions.empty()) {
     // Skip the call to find() in case we don't have any join conditions.
     // TODO(sgunders): Is this relevant for performance anymore?
-    if (m_row_buffer.empty()) {
-      m_current_row = LinkedImmutableString{nullptr};
-    } else {
-      m_current_row = m_row_buffer.begin()->second;
-    }
+    m_current_row =
+        m_row_buffer.first_row().value_or(LinkedImmutableString{nullptr});
     m_state = State::READING_FIRST_ROW_FROM_HASH_TABLE;
     return;
   }
@@ -881,12 +877,8 @@ void HashJoinIterator::LookupProbeRowInHashTable() {
   hash_join_buffer::Key key{m_temporary_row_and_join_key_buffer.ptr(),
                             m_temporary_row_and_join_key_buffer.length()};
 
-  auto it = m_row_buffer.find(key);
-  if (it == m_row_buffer.end()) {
-    m_current_row = LinkedImmutableString{nullptr};
-  } else {
-    m_current_row = it->second;
-  }
+  m_current_row =
+      m_row_buffer.find(key).value_or(LinkedImmutableString{nullptr});
 
   m_state = State::READING_FIRST_ROW_FROM_HASH_TABLE;
 }
@@ -912,18 +904,27 @@ bool HashJoinIterator::WriteProbeRowToDiskIfApplicable() {
   // need to write it out to disk. Outer joins should always write the row out
   // to disk, since the probe/left input should return NULL-complemented rows
   // even if the join condition contains SQL NULL.
-  const bool write_rows_with_null_in_join_key = m_join_type == JoinType::OUTER;
   if (m_state == State::READING_FIRST_ROW_FROM_HASH_TABLE) {
     const bool found_match = m_current_row != nullptr;
 
     if ((m_join_type == JoinType::INNER || m_join_type == JoinType::OUTER) ||
         !found_match) {
       if (on_disk_hash_join() && m_current_chunk == -1) {
+        // For inner joins and semijoins, we can skip probe rows that have a
+        // NULL in the join key, unless the join condition uses NULL-safe equal
+        // (<=>), because we know that it won't have any match in the build
+        // table. For left outer join and antijoin, however, rows in the
+        // outer/probe table which have no match in the inner/build table, will
+        // be part of the join result, so we can't skip rows with NULLs for
+        // those join types. Hence, store_row_with_null_in_join_key must be true
+        // for left outer join and antijoin.
+        const bool store_row_with_null_in_join_key =
+            m_join_type == JoinType::OUTER || m_join_type == JoinType::ANTI;
         if (WriteRowToChunk(thd(), &m_chunk_files_on_disk,
                             false /* write_to_build_chunk */,
                             m_probe_input_tables, m_join_conditions,
                             kChunkPartitioningHashSeed, found_match,
-                            write_rows_with_null_in_join_key,
+                            store_row_with_null_in_join_key,
                             &m_temporary_row_and_join_key_buffer)) {
           return true;
         }

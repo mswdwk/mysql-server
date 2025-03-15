@@ -1,15 +1,16 @@
-/* Copyright (c) 2007, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2007, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -384,7 +385,13 @@ int mysql_audit_notify(THD *thd, mysql_event_general_subclass_t subclass,
   event.general_host = sctx->host();
   event.general_external_user = sctx->external_user();
   event.general_rows = thd->get_stmt_da()->current_row_for_condition();
-  event.general_sql_command = sql_statement_names[thd->lex->sql_command];
+
+  if (msg != nullptr && thd->lex->sql_command == SQLCOM_END &&
+      thd->get_command() != COM_QUERY) {
+    event.general_sql_command = {STRING_WITH_LEN("")};
+  } else {
+    event.general_sql_command = sql_statement_names[thd->lex->sql_command];
+  }
 
   event.general_charset = const_cast<CHARSET_INFO *>(
       thd_get_audit_query(thd, &event.general_query));
@@ -1298,7 +1305,7 @@ static bool calc_class_mask(THD *, plugin_ref plugin, void *arg) {
 int finalize_audit_plugin(st_plugin_int *plugin) {
   unsigned long event_class_mask[MYSQL_AUDIT_CLASS_MASK_SIZE];
 
-  if (plugin->plugin->deinit && plugin->plugin->deinit(nullptr)) {
+  if (plugin->plugin->deinit && plugin->plugin->deinit(plugin)) {
     DBUG_PRINT("warning", ("Plugin '%s' deinit function returned error.",
                            plugin->name.str));
     DBUG_EXECUTE("finalize_audit_plugin", return 1;);

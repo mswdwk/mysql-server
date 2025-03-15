@@ -1,18 +1,19 @@
 /*****************************************************************************
 
 Copyright (c) 2009, 2010 Facebook, Inc.
-Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+Copyright (c) 2011, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -95,34 +96,6 @@ external tools. */
 #include "my_inttypes.h"
 #include "univ.i"
 #include "ut0crc32.h"
-
-#ifdef CRC32_x86_64
-#include <nmmintrin.h>
-#include <wmmintrin.h>
-#endif /* CRC32_x86_64 */
-
-#ifdef CRC32_x86_64_WIN
-#include <intrin.h>
-#endif /* CRC32_x86_64_WIN */
-
-#ifdef CRC32_ARM64
-#include <arm_acle.h>
-#include <arm_neon.h>
-#endif /* CRC32_ARM64 */
-
-#ifdef CRC32_ARM64_DEFAULT
-#include <asm/hwcap.h>
-#include <sys/auxv.h>
-#endif /* CRC32_ARM64_DEFAULT */
-
-#ifdef CRC32_ARM64_APPLE
-#if __has_include(<asm/hwcap.h>) &&  __has_include(<sys/auxv.h>)
-#error \
-    "Current implementation is based on assumption that APPLE_ARM always " \
-    "supports crc32 and pmull and that there is no way to check it, yet it "\
-    "seem that this APPLE_ARM has getauxval()."
-#endif /* __has_include(<asm/hwcap.h>) &&  __has_include(<sys/auxv.h>) */
-#endif /* CRC32_ARM64_APPLE */
 
 /** Pointer to CRC32 calculation function. */
 ut_crc32_func_t ut_crc32;
@@ -378,7 +351,7 @@ you can write:
 template <size_t iterations>
 struct Loop {
   template <typename Step_executor, typename... Args>
-  static void run(Args &&... args) {
+  static void run(Args &&...args) {
     Loop<iterations - 1>::template run<Step_executor, Args...>(
         std::forward<Args>(args)...);
     Step_executor::template run<iterations - 1>(std::forward<Args>(args)...);

@@ -1,15 +1,16 @@
-/* Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -71,6 +72,7 @@
 
 #include "ft_global.h"
 #include "libbinlogevents/include/binlog_event.h"
+#include "libbinlogevents/include/binlog_event.h"  // binary_log::max_log_event_size
 #include "libbinlogevents/include/compression/zstd_comp.h"  // DEFAULT_COMPRESSION_LEVEL
 #include "m_string.h"
 #include "my_aes.h"  // my_aes_opmode_names
@@ -102,7 +104,6 @@
 #include "sql/events.h"          // Events
 #include "sql/hostname_cache.h"  // host_cache_resize
 #include "sql/log.h"
-#include "sql/log_event.h"  // MAX_MAX_ALLOWED_PACKET
 #include "sql/mdl.h"
 #include "sql/my_decimal.h"
 #include "sql/opt_trace_context.h"
@@ -124,8 +125,7 @@
 #include "sql/server_component/log_builtins_filter_imp.h"  // until we have pluggable variables
 #include "sql/server_component/log_builtins_imp.h"
 #include "sql/session_tracker.h"
-#include "sql/sp_head.h"          // SP_PSI_STATEMENT_INFO_COUNT
-#include "sql/sql_backup_lock.h"  // is_instance_backup_locked
+#include "sql/sp_head.h"  // SP_PSI_STATEMENT_INFO_COUNT
 #include "sql/sql_lex.h"
 #include "sql/sql_locale.h"            // my_locale_by_number
 #include "sql/sql_parse.h"             // killall_non_super_threads
@@ -498,13 +498,30 @@ static Sys_var_charptr Sys_pfs_instrument(
     CMD_LINE(OPT_ARG, OPT_PFS_INSTRUMENT), IN_FS_CHARSET, DEFAULT(""),
     PFS_TRAILING_PROPERTIES);
 
+/**
+  Update the performance_schema_show_processlist.
+  Warn that the use of information_schema processlist is deprecated.
+*/
+static bool performance_schema_show_processlist_update(sys_var *, THD *thd,
+                                                       enum_var_type) {
+  push_warning_printf(thd, Sql_condition::SL_WARNING,
+                      ER_WARN_DEPRECATED_WITH_NOTE,
+                      ER_THD(thd, ER_WARN_DEPRECATED_WITH_NOTE),
+                      "@@performance_schema_show_processlist",
+                      "When it is removed, SHOW PROCESSLIST will always use the"
+                      " performance schema implementation.");
+
+  return false;
+}
+
 static Sys_var_bool Sys_pfs_processlist(
     "performance_schema_show_processlist",
     "Default startup value to enable SHOW PROCESSLIST "
     "in the performance schema.",
     GLOBAL_VAR(pfs_processlist_enabled), CMD_LINE(OPT_ARG), DEFAULT(false),
-    NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr),
-    nullptr, sys_var::PARSE_NORMAL);
+    NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(nullptr),
+    ON_UPDATE(performance_schema_show_processlist_update), nullptr,
+    sys_var::PARSE_NORMAL);
 
 static Sys_var_bool Sys_pfs_consumer_events_stages_current(
     "performance_schema_consumer_events_stages_current",
@@ -1415,11 +1432,12 @@ static Sys_var_enum Sys_binlog_format(
     "SQL statements for most statements, and row format for statements that "
     "cannot be replayed in a deterministic manner using SQL. If NDBCLUSTER "
     "is enabled and binlog-format is MIXED, the format switches to row-based "
-    "and back implicitly for each query accessing an NDBCLUSTER table.",
+    "and back implicitly for each query accessing an NDBCLUSTER table."
+    " This option is deprecated and will be removed in a future version.",
     SESSION_VAR(binlog_format), CMD_LINE(REQUIRED_ARG, OPT_BINLOG_FORMAT),
     binlog_format_names, DEFAULT(BINLOG_FORMAT_ROW), NO_MUTEX_GUARD,
     NOT_IN_BINLOG, ON_CHECK(binlog_format_check),
-    ON_UPDATE(fix_binlog_format_after_update));
+    ON_UPDATE(fix_binlog_format_after_update), DEPRECATED_VAR(""));
 
 static const char *rbr_exec_mode_names[] = {"STRICT", "IDEMPOTENT", nullptr};
 static Sys_var_enum rbr_exec_mode(
@@ -1504,7 +1522,7 @@ static Sys_var_uint Sys_binlog_transaction_compression_level_zstd(
     SESSION_VAR(binlog_trx_compression_level_zstd), CMD_LINE(REQUIRED_ARG),
     VALID_RANGE(1, 22),
     DEFAULT(binary_log::transaction::compression::Zstd_comp::
-                DEFAULT_COMPRESSION_LEVEL),
+                default_compression_level),
     BLOCK_SIZE(1), NO_MUTEX_GUARD, NOT_IN_BINLOG,
     ON_CHECK(check_binlog_trx_compression), ON_UPDATE(nullptr));
 
@@ -1877,8 +1895,9 @@ static Sys_var_struct<CHARSET_INFO, Get_csname> Sys_character_set_system(
 
 static Sys_var_struct<CHARSET_INFO, Get_csname> Sys_character_set_server(
     "character_set_server", "The default character set",
-    SESSION_VAR(collation_server), NO_CMD_LINE, DEFAULT(&default_charset_info),
-    NO_MUTEX_GUARD, IN_BINLOG, ON_CHECK(check_charset_not_null));
+    PERSIST_AS_READONLY SESSION_VAR(collation_server), NO_CMD_LINE,
+    DEFAULT(&default_charset_info), NO_MUTEX_GUARD, IN_BINLOG,
+    ON_CHECK(check_charset_not_null));
 
 static bool check_charset_db(sys_var *self, THD *thd, set_var *var) {
   if (check_session_admin(self, thd, var)) return true;
@@ -2495,8 +2514,11 @@ static Sys_var_bool Sys_trust_function_creators(
     "break binary logging. Note that if ALL connections to this server "
     "ALWAYS use row-based binary logging, the security issues do not "
     "exist and the binary logging cannot break, so you can safely set "
-    "this to TRUE",
-    GLOBAL_VAR(trust_function_creators), CMD_LINE(OPT_ARG), DEFAULT(false));
+    "this to TRUE. This variable is deprecated and will be removed in a "
+    "future version.",
+    GLOBAL_VAR(trust_function_creators), CMD_LINE(OPT_ARG), DEFAULT(false),
+    NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr),
+    DEPRECATED_VAR(""));
 
 static Sys_var_bool Sys_check_proxy_users(
     "check_proxy_users",
@@ -2794,8 +2816,11 @@ static Sys_var_enum Sys_log_timestamps(
 static Sys_var_bool Sys_log_statements_unsafe_for_binlog(
     "log_statements_unsafe_for_binlog",
     "Log statements considered unsafe when using statement based binary "
-    "logging.",
-    GLOBAL_VAR(opt_log_unsafe_statements), CMD_LINE(OPT_ARG), DEFAULT(true));
+    "logging. This variable is deprecated and will be removed in a "
+    "future version.",
+    GLOBAL_VAR(opt_log_unsafe_statements), CMD_LINE(OPT_ARG), DEFAULT(true),
+    NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr),
+    DEPRECATED_VAR(""));
 
 static bool update_cached_long_query_time(sys_var *, THD *thd,
                                           enum_var_type type) {
@@ -2892,8 +2917,8 @@ static Sys_var_ulong Sys_replica_max_allowed_packet(
     "The maximum size of packets sent from an upstream source server to this "
     "server.",
     GLOBAL_VAR(replica_max_allowed_packet), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(1024, MAX_MAX_ALLOWED_PACKET), DEFAULT(MAX_MAX_ALLOWED_PACKET),
-    BLOCK_SIZE(1024));
+    VALID_RANGE(1024, binary_log::max_log_event_size),
+    DEFAULT(binary_log::max_log_event_size), BLOCK_SIZE(1024));
 
 static Sys_var_deprecated_alias Sys_slave_max_allowed_packet(
     "slave_max_allowed_packet", Sys_replica_max_allowed_packet);
@@ -3238,11 +3263,16 @@ static Sys_var_ulong Sys_net_retry_count(
 static Sys_var_bool Sys_new_mode("new",
                                  "Use very new possible \"unsafe\" functions",
                                  SESSION_VAR(new_mode), CMD_LINE(OPT_ARG, 'n'),
-                                 DEFAULT(false));
+                                 DEFAULT(false), NO_MUTEX_GUARD, NOT_IN_BINLOG,
+                                 ON_CHECK(nullptr), ON_UPDATE(nullptr),
+                                 DEPRECATED_VAR(""));
 
 static Sys_var_bool Sys_old_mode("old", "Use compatible behavior",
                                  READ_ONLY GLOBAL_VAR(old_mode),
-                                 CMD_LINE(OPT_ARG), DEFAULT(false));
+                                 CMD_LINE(OPT_ARG, OPT_OLD_OPTION),
+                                 DEFAULT(false), NO_MUTEX_GUARD, NOT_IN_BINLOG,
+                                 ON_CHECK(nullptr), ON_UPDATE(nullptr),
+                                 DEPRECATED_VAR(""));
 
 static Sys_var_bool Sys_old_alter_table("old_alter_table",
                                         "Use old, non-optimized alter table",
@@ -3352,7 +3382,7 @@ static Sys_var_ulonglong Sys_parser_max_mem_size(
   Also update global_system_variables, so 'SELECT parser_max_mem_size'
   reports correct data.
 */
-export void update_parser_max_mem_size() {
+void update_parser_max_mem_size() {
   const ulonglong max_max = max_system_variables.parser_max_mem_size;
   if (max_max == max_mem_sz) return;
   // In case parser-max-mem-size is also set:
@@ -3360,6 +3390,13 @@ export void update_parser_max_mem_size() {
       std::min(max_max, global_system_variables.parser_max_mem_size);
   Sys_parser_max_mem_size.update_default(new_val);
   global_system_variables.parser_max_mem_size = new_val;
+}
+
+void update_optimizer_switch() {
+#ifndef WITH_HYPERGRAPH_OPTIMIZER
+  global_system_variables.optimizer_switch &=
+      ~OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER;
+#endif
 }
 
 static bool check_optimizer_switch(sys_var *, THD *thd [[maybe_unused]],
@@ -3472,7 +3509,7 @@ static Sys_var_ulong Sys_connection_memory_chunk_size(
     "connection_memory_chunk_size",
     "Chunk size regulating frequency of updating the global memory counter",
     SESSION_VAR(conn_mem_chunk_size), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(1, 1024 * 1024 * 512), DEFAULT(8912), BLOCK_SIZE(1),
+    VALID_RANGE(1, 1024 * 1024 * 512), DEFAULT(8192), BLOCK_SIZE(1),
     NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(check_session_admin),
     ON_UPDATE(nullptr));
 
@@ -4225,10 +4262,12 @@ static Sys_var_enum Binlog_transaction_dependency_tracking(
     "replica_parallel_type=LOGICAL_CLOCK. "
     "Possible values are COMMIT_ORDER, WRITESET and WRITESET_SESSION.",
     GLOBAL_VAR(mysql_bin_log.m_dependency_tracker.m_opt_tracking_mode),
-    CMD_LINE(REQUIRED_ARG), opt_binlog_transaction_dependency_tracking_names,
+    CMD_LINE(REQUIRED_ARG, OPT_BINLOG_TRANSACTION_DEPENDENCY_TRACKING),
+    opt_binlog_transaction_dependency_tracking_names,
     DEFAULT(DEPENDENCY_TRACKING_COMMIT_ORDER), &PLock_slave_trans_dep_tracker,
     NOT_IN_BINLOG, ON_CHECK(check_binlog_transaction_dependency_tracking),
-    ON_UPDATE(update_binlog_transaction_dependency_tracking));
+    ON_UPDATE(update_binlog_transaction_dependency_tracking),
+    DEPRECATED_VAR(""));
 static Sys_var_ulong Binlog_transaction_dependency_history_size(
     "binlog_transaction_dependency_history_size",
     "Maximum number of rows to keep in the writeset history.",
@@ -4994,31 +5033,15 @@ static Sys_var_ulong Sys_max_execution_time(
     HINT_UPDATEABLE SESSION_VAR(max_execution_time), CMD_LINE(REQUIRED_ARG),
     VALID_RANGE(0, ULONG_MAX), DEFAULT(0), BLOCK_SIZE(1));
 
-static bool update_fips_mode(sys_var *, THD *, enum_var_type) {
-  char ssl_err_string[OPENSSL_ERROR_LENGTH] = {'\0'};
-  if (set_fips_mode(opt_ssl_fips_mode, ssl_err_string)) {
-    opt_ssl_fips_mode = get_fips_mode();
-    std::string err;
-    if (ssl_err_string[0]) {
-      err.append("Openssl is not fips enabled. Error: ");
-      err.append(ssl_err_string);
-    } else
-      err.append("Openssl is not fips enabled");
-    my_error(ER_DA_SSL_FIPS_MODE_ERROR, MYF(0), err.c_str());
-    return true;
-  } else {
-    return false;
-  }
-}
-
 static const char *ssl_fips_mode_names[] = {"OFF", "ON", "STRICT", nullptr};
 static Sys_var_enum Sys_ssl_fips_mode(
     "ssl_fips_mode",
     "SSL FIPS mode (applies only for OpenSSL); "
     "permitted values are: OFF, ON, STRICT",
-    GLOBAL_VAR(opt_ssl_fips_mode), CMD_LINE(REQUIRED_ARG, OPT_SSL_FIPS_MODE),
-    ssl_fips_mode_names, DEFAULT(0), NO_MUTEX_GUARD, NOT_IN_BINLOG,
-    ON_CHECK(nullptr), ON_UPDATE(update_fips_mode), nullptr);
+    READ_ONLY GLOBAL_VAR(opt_ssl_fips_mode),
+    CMD_LINE(REQUIRED_ARG, OPT_SSL_FIPS_MODE), ssl_fips_mode_names, DEFAULT(0),
+    NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr),
+    DEPRECATED_VAR(""), sys_var::PARSE_EARLY);
 
 static Sys_var_bool Sys_auto_generate_certs(
     "auto_generate_certs",
@@ -6330,9 +6353,12 @@ static Sys_var_uint Sys_sync_relayloginfo_period(
     "sync_relay_log_info",
     "Synchronously flush relay log info "
     "to disk after every #th transaction. Use 0 to disable "
-    "synchronous flushing",
-    GLOBAL_VAR(sync_relayloginfo_period), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(0, UINT_MAX), DEFAULT(10000), BLOCK_SIZE(1));
+    "synchronous flushing. This variable is deprecated and will be removed in "
+    "a future version.",
+    GLOBAL_VAR(sync_relayloginfo_period),
+    CMD_LINE(REQUIRED_ARG, OPT_SYNC_RELAY_LOG_INFO), VALID_RANGE(0, UINT_MAX),
+    DEFAULT(10000), BLOCK_SIZE(1), NO_MUTEX_GUARD, NOT_IN_BINLOG,
+    ON_CHECK(nullptr), ON_UPDATE(nullptr), DEPRECATED_VAR(""));
 
 static Sys_var_uint Sys_replica_checkpoint_period(
     "replica_checkpoint_period",

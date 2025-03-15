@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -404,7 +405,14 @@ struct multi_value_data {
   If current data array is for INSERT and DELETE, this can(should) be
   nullptr since all values in current array should be handled in these
   two cases. */
-  Bitset *bitset;
+  Bitset<> *bitset;
+
+#ifdef UNIV_DEBUG
+  /** The size of bitmap buffer in bytes. The bitset might point into
+  some prefix of it, and be later made shorter or longer, but not longer
+  than this length of underlying buffer. */
+  size_t bitmap_bytes{};
+#endif
 
   /** Allocate specified number of elements for all arrays and initialize
   the structure accordingly
@@ -509,7 +517,12 @@ struct multi_value_data {
            sizeof(*conv_buf) * multi_value->num_v);
     if (multi_value->bitset != nullptr) {
       ut_ad(bitset != nullptr);
-      *bitset = *multi_value->bitset;
+      ut_ad(multi_value->bitset->size_bytes() <= bitmap_bytes);
+      /* adjust the size to match that of multi_value, but keep pointing to the
+      old buffer */
+      *bitset = Bitset<>(bitset->data(), multi_value->bitset->size_bytes());
+      /* copy the actual data into the buffer from multi_value's buffer */
+      bitset->copy_from(multi_value->bitset->data());
     }
     num_v = multi_value->num_v;
   }

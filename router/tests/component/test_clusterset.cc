@@ -1,16 +1,17 @@
 /*
-Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+Copyright (c) 2021, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -52,6 +53,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "router_component_clusterset.h"
 #include "router_component_test.h"
 #include "router_component_testutils.h"
+#include "router_config.h"  // MYSQL_ROUTER_VERSION
 #include "tcp_port_pool.h"
 
 using mysqlrouter::ClusterType;
@@ -243,12 +245,35 @@ class ClusterSetTest : public RouterComponentClusterSetTest {
     }
   }
 
-  int get_update_attributes_count(const std::string &json_string) {
-    return get_int_field_value(json_string, "update_attributes_count");
-  }
+  void verify_no_last_check_in_updates(const ClusterSetData &cs_topology,
+                                       const std::chrono::milliseconds period) {
+    // <cluster_id, node_id>
+    using NodeId = std::pair<unsigned, unsigned>;
+    std::map<NodeId, size_t> count;
 
-  int get_update_last_check_in_count(const std::string &json_string) {
-    return get_int_field_value(json_string, "update_last_check_in_count");
+    // in the first run pick up how many times the last_check_in update was
+    // performed on each node so far
+    for (const auto &cluster : cs_topology.clusters) {
+      unsigned node_id = 0;
+      for (const auto &node : cluster.nodes) {
+        count[NodeId(cluster.id, node_id)] =
+            get_int_global_value(node.http_port, "update_last_check_in_count");
+        ++node_id;
+      }
+    }
+
+    std::this_thread::sleep_for(period);
+
+    // make sure the last_check_in update counter was not incremented on any of
+    // the nodes
+    for (const auto &cluster : cs_topology.clusters) {
+      unsigned node_id = 0;
+      for (const auto &node : cluster.nodes) {
+        EXPECT_EQ(
+            get_int_global_value(node.http_port, "update_last_check_in_count"),
+            count[NodeId(cluster.id, node_id)]);
+      }
+    }
   }
 
   std::string router_conf_file;
@@ -1572,6 +1597,8 @@ class PrimaryTargetClusterMarkedInvalidInTheMetadataTest
  * @test Check that when target_cluster is marked as invalidated in the metadata
  * the Router either handles only RO connections or no connections at all
  * depending on the invalidatedClusterRoutingPolicy
+ * Also checks that the Router does not do internal UPDATE (last_check_in)
+ * queries on the invalidated cluster.
  * [@FR11]
  * [@TS_R15_1-3]
  */
@@ -1586,7 +1613,8 @@ TEST_P(PrimaryTargetClusterMarkedInvalidInTheMetadataTest,
   create_clusterset(view_id, /*target_cluster_id*/ kPrimaryClusterId,
                     /*primary_cluster_id*/ kPrimaryClusterId,
                     "metadata_clusterset.js",
-                    /*router_options*/ R"({"target_cluster" : "primary"})");
+                    /*router_options*/ R"({"target_cluster" : "primary", 
+                                          "stats_updates_frequency": 1})");
   /* auto &router = */ launch_router();
 
   EXPECT_TRUE(wait_for_transaction_count_increase(
@@ -1605,6 +1633,7 @@ TEST_P(PrimaryTargetClusterMarkedInvalidInTheMetadataTest,
   SCOPED_TRACE(
       "// Mark our PRIMARY cluster as invalidated in the metadata, also set "
       "the selected invalidatedClusterRoutingPolicy");
+
   clusterset_data_.clusters[kPrimaryClusterId].invalid = true;
   for (const auto &cluster : clusterset_data_.clusters) {
     for (const auto &node : cluster.nodes) {
@@ -1613,7 +1642,8 @@ TEST_P(PrimaryTargetClusterMarkedInvalidInTheMetadataTest,
           view_id + 1, /*this_cluster_id*/ cluster.id,
           /*target_cluster_id*/ kPrimaryClusterId, http_port, clusterset_data_,
           /*router_options*/
-          R"({"target_cluster" : "primary", "invalidated_cluster_policy" : ")" +
+          R"({"target_cluster" : "primary", "stats_updates_frequency": 1,
+               "invalidated_cluster_policy" : ")" +
               policy + "\" }");
     }
   }
@@ -1640,6 +1670,10 @@ TEST_P(PrimaryTargetClusterMarkedInvalidInTheMetadataTest,
                                .nodes[kRONodeId]
                                .classic_port);
   }
+
+  // Primary cluster is invalidated - Router should not do any UPDATE operations
+  // on it
+  verify_no_last_check_in_updates(clusterset_data_, 1500ms);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -2545,6 +2579,107 @@ TEST_F(ClusterSetTest, UseMultipleClustersGrNotifications) {
     }
   }
 }
+
+static constexpr const unsigned long max_supported_version =
+    MYSQL_ROUTER_VERSION_MAJOR * 10000 + MYSQL_ROUTER_VERSION_MINOR * 100 + 99;
+
+struct ServerCompatTestParam {
+  std::string description;
+  std::string server_version;
+  bool expect_failure;
+  std::string expected_error_msg;
+};
+
+class CheckServerCompatibilityTest
+    : public ClusterSetTest,
+      public ::testing::WithParamInterface<ServerCompatTestParam> {};
+
+/**
+ * @test
+ *       Verifies that the server version is checked for compatibility when the
+ * Router is running with the ClusterSet
+ */
+TEST_P(CheckServerCompatibilityTest, Spec) {
+  RecordProperty("Description", GetParam().description);
+
+  const auto target_cluster_id = 0;
+
+  create_clusterset(view_id, target_cluster_id, 0, "metadata_clusterset.js");
+
+  SCOPED_TRACE("// Launch the Router");
+  auto &router = launch_router(EXIT_SUCCESS, 10s, kTTL, true);
+
+  EXPECT_TRUE(wait_for_transaction_count_increase(
+      clusterset_data_.clusters[0].nodes[0].http_port, 2));
+
+  make_new_connection_ok(
+      router_port_rw,
+      clusterset_data_.clusters[target_cluster_id].nodes[0].classic_port);
+
+  make_new_connection_ok(
+      router_port_ro,
+      clusterset_data_.clusters[target_cluster_id].nodes[1].classic_port);
+
+  for (const auto &cluster : clusterset_data_.clusters) {
+    for (const auto &node : cluster.nodes) {
+      set_mock_server_version(node.http_port, GetParam().server_version);
+    }
+  }
+
+  EXPECT_TRUE(wait_for_transaction_count_increase(
+      clusterset_data_.clusters[0].nodes[0].http_port, 2));
+
+  if (GetParam().expect_failure) {
+    verify_new_connection_fails(router_port_rw);
+    verify_new_connection_fails(router_port_ro);
+
+    EXPECT_TRUE(wait_log_contains(router, GetParam().expected_error_msg, 5s));
+  } else {
+    make_new_connection_ok(
+        router_port_rw,
+        clusterset_data_.clusters[target_cluster_id].nodes[0].classic_port);
+
+    make_new_connection_ok(
+        router_port_ro,
+        clusterset_data_.clusters[target_cluster_id].nodes[2].classic_port);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Spec, CheckServerCompatibilityTest,
+    ::testing::Values(
+        ServerCompatTestParam{"Server is the same version as Router - OK",
+                              std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                                  std::to_string(MYSQL_ROUTER_VERSION_MINOR) +
+                                  "." +
+                                  std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+                              false, ""},
+        ServerCompatTestParam{
+            "Server major version is highier than Router - "
+            "we should reject the metadata",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            true,
+            "WARNING .* Unsupported MySQL Server version '.*'. Maximal "
+            "supported version is '" +
+                std::to_string(max_supported_version) + "'."},
+        ServerCompatTestParam{
+            "Server minor version is highier than Router - "
+            "we should reject the metadata",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            true,
+            "WARNING .* Unsupported MySQL Server version '.*'. Maximal "
+            "supported version is '" +
+                std::to_string(max_supported_version) + "'."},
+        ServerCompatTestParam{
+            "Server patch version is highier than Router - OK",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH + 1),
+            false, ""}));
 
 int main(int argc, char *argv[]) {
   init_windows_sockets();

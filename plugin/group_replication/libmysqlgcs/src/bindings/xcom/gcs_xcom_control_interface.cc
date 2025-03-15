@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -554,7 +555,9 @@ bool Gcs_xcom_control::try_send_add_node_request_to_seeds(
 
   // Until the add_node is successfully sent, for each peer...
   for (auto it = m_initial_peers.begin();
-       !add_node_accepted && it != m_initial_peers.end(); it++) {
+       !m_view_control->is_finalized() && !add_node_accepted &&
+       it != m_initial_peers.end();
+       it++) {
     // ...try to connect to it and send it the add_node request.
     Gcs_xcom_node_address &peer = **it;
 
@@ -562,9 +565,8 @@ bool Gcs_xcom_control::try_send_add_node_request_to_seeds(
     connection_descriptor *con = nullptr;
     std::tie(connected, con) = connect_to_peer(peer, my_addresses);
 
-    if (m_view_control->is_finalized()) break;
-
-    if (connected) {
+    if (bool finalized = m_view_control->is_finalized();
+        !finalized && connected) {
       MYSQL_GCS_LOG_INFO("Sucessfully connected to peer "
                          << peer.get_member_ip().c_str() << ":"
                          << peer.get_member_port()
@@ -596,7 +598,7 @@ bool Gcs_xcom_control::try_send_add_node_request_to_seeds(
       if (xcom_will_process) add_node_accepted = true;
     }
 
-    if (con != nullptr) free(con);
+    free_connection(con);
   }
 
   return add_node_accepted;
@@ -1990,6 +1992,7 @@ void Gcs_suspicions_manager::process_view(
     std::vector<Gcs_member_identifier *> non_member_suspect_nodes,
     bool is_killer_node, synode_no max_synode) {
   bool should_wake_up_manager = false;
+  std::vector<Gcs_member_identifier *> back_to_healthy;
 
   m_suspicions_mutex.lock();
 
@@ -1997,8 +2000,27 @@ void Gcs_suspicions_manager::process_view(
 
   m_config_id = config_id;
 
+  /* Remove the information about expels of members left because they
+   * have already taken effect(left). */
   m_expels_in_progress.forget_expels_that_have_taken_effect(config_id,
                                                             left_nodes);
+
+  /* Remove the information about expels of members alive because they
+   * have already taken effect(rejoined). */
+  if (m_expels_in_progress.size() && !alive_nodes.empty()) {
+    for (Gcs_member_identifier *const &live : alive_nodes) {
+      if (m_expels_in_progress.contains(*live)) {
+        MYSQL_GCS_LOG_DEBUG(
+            "%s: Expelled node %s, rejoined the group immediately.", __func__,
+            live->get_member_id().c_str());
+        back_to_healthy.push_back(live);
+      }
+    }
+    if (!back_to_healthy.empty())
+      m_expels_in_progress.forget_expels_that_have_taken_effect(
+          config_id, back_to_healthy);
+  }
+
   MYSQL_GCS_DEBUG_EXECUTE({
     /* Sanity check: all members in `m_expels_in_progress` must still be in
        `xcom_nodes` (the XCom view) at this point. Otherwise there is a bug in

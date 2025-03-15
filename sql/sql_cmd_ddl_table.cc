@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -100,10 +101,6 @@ static bool populate_table(THD *thd, LEX *lex) {
 
   if (lex->set_var_list.elements && resolve_var_assignments(thd, lex))
     return true;
-
-  // Use the hypergraph optimizer for the SELECT statement, if enabled.
-  lex->using_hypergraph_optimizer =
-      thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER);
 
   lex->set_exec_started();
 
@@ -360,6 +357,7 @@ bool Sql_cmd_create_table::execute(THD *thd) {
 
     Query_result_create *result;
     if (!query_expression->is_prepared()) {
+      const Prepare_error_tracker tracker(thd);
       Prepared_stmt_arena_holder ps_arena_holder(thd);
       result = new (thd->mem_root)
           Query_result_create(create_table, &query_block->fields,
@@ -368,6 +366,11 @@ bool Sql_cmd_create_table::execute(THD *thd) {
         lex->link_first_table_back(create_table, link_to_local);
         return true;
       }
+
+      // Use the hypergraph optimizer for the SELECT statement, if enabled.
+      lex->set_using_hypergraph_optimizer(
+          thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER));
+
       if (query_expression->prepare(thd, result, nullptr, SELECT_NO_UNLOCK,
                                     0)) {
         lex->link_first_table_back(create_table, link_to_local);
@@ -459,6 +462,18 @@ bool Sql_cmd_create_table::execute(THD *thd) {
   return res;
 }
 
+bool Sql_cmd_create_table::reprepare_on_execute_required() const {
+  // Expressions in key and partition clauses end up with being allocated on
+  // differing (incompatible) MEM_ROOTs and thus need to be reprepared. The
+  // incompatibility arises in the case of prepared statements as a parse tree
+  // MEM_ROOT whose lifetime is associated with the lifetime of the prepared
+  // statement ends up containing pointers to parse tree objects that have been
+  // allocated from a MEM_ROOT with a lifetime of the prepared statement's
+  // execution. It's benign (though wasteful) to reprepare other create table
+  // statements as well.
+  return true;
+}
+
 const MYSQL_LEX_CSTRING *
 Sql_cmd_create_table::eligible_secondary_storage_engine() const {
   // Now check if the opened tables are available in a secondary
@@ -542,6 +557,18 @@ bool Sql_cmd_create_or_drop_index_base::execute(THD *thd) {
   /* Pop Strict_error_handler */
   if (thd->is_strict_mode()) thd->pop_internal_handler();
   return res;
+}
+
+bool Sql_cmd_create_index::reprepare_on_execute_required() const {
+  // Expressions in index/key clauses end up with being allocated on
+  // differing (incompatible) MEM_ROOTs and thus need to be reprepared.
+  // The incompatibility arises in the case of prepared statements as a parse
+  // tree MEM_ROOT whose lifetime is associated with the lifetime of the
+  // prepared statement ends up containing pointers to parse tree objects that
+  // have been allocated from a MEM_ROOT with a lifetime of the prepared
+  // statement's execution. It's benign (though wasteful) to reprepare other
+  // create index statements as well.
+  return true;
 }
 
 bool Sql_cmd_cache_index::execute(THD *thd) {

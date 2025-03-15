@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -144,8 +145,9 @@ class Binlog_sender {
      - binlog_row_event_max_size is defined as an unsigned long,
        thence in theory row events can be bigger than UINT_MAX32.
 
-     - max_allowed_packet is set to MAX_MAX_ALLOWED_PACKET which is in
-       turn defined as 1GB (i.e., 1024*1024*1024). (@c Binlog_sender::init()).
+     - max_allowed_packet is set to binary_log::max_log_event_size
+       which is in turn defined as 1GB (i.e., 1024*1024*1024). (@c
+       Binlog_sender::init()).
 
      Therefore, anything bigger than UINT_MAX32 is not loadable into the
      packet, thus we set the limit to 4GB (which is the value for UINT_MAX32,

@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,14 +38,18 @@ static PFS_engine_table_share_proxy *pfs_proxy_shares[2] = {
     ndb_sync_pending_objects_share, ndb_sync_excluded_objects_share};
 
 PSI_memory_key key_memory_thd_ndb_batch_mem_root;
+PSI_memory_key key_memory_ndb_dd_client_mem_root;
 
 bool ndb_pfs_init() {
   {
     // List of memory keys to register
-    PSI_memory_info mem_keys[] = {{&key_memory_thd_ndb_batch_mem_root,
-                                   "Thd_ndb::batch_mem_root",
-                                   (PSI_FLAG_THREAD | PSI_FLAG_MEM_COLLECT), 0,
-                                   "Memory used for transaction batching"}};
+    PSI_memory_info mem_keys[] = {
+        {&key_memory_thd_ndb_batch_mem_root, "Thd_ndb::batch_mem_root",
+         (PSI_FLAG_THREAD | PSI_FLAG_MEM_COLLECT), 0,
+         "Memory used for transaction batching"},
+        {&key_memory_ndb_dd_client_mem_root, "Ndb_dd_client::dd_mem_root",
+         (PSI_FLAG_THREAD | PSI_FLAG_MEM_COLLECT), 0,
+         "Memory used for DD access"}};
     mysql_memory_register("ndbcluster", mem_keys,
                           sizeof(mem_keys) / sizeof(mem_keys[0]));
   }

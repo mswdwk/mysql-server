@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -41,6 +42,19 @@ PSI_memory_key key_memory_string_service_iterator;
   So, that by default this service is available to all the components
   register to the server.
 */
+
+namespace {
+/**
+  mysql_string_itrerator structure to provide service to components
+*/
+struct st_string_iterator {
+  String *iterator_str;
+  const char *iterator_ptr;
+  int ctype;
+  int value_status;
+  ulong value;
+};
+}  // namespace
 
 struct my_h_string_imp {};
 
@@ -143,7 +157,10 @@ DEFINE_BOOL_METHOD(mysql_string_imp::convert_from_buffer,
     CHARSET_INFO *cs =
         get_charset_by_csname(charset_name, MY_CS_PRIMARY, MYF(0));
 
-    if (!cs || res->copy(in_buffer, length, cs)) return true;
+    if (!cs || res->copy(in_buffer, length, cs)) {
+      delete[] res;
+      return true;
+    }
     *out_string = (my_h_string)res;
     return false;
   } catch (...) {
@@ -321,6 +338,7 @@ DEFINE_BOOL_METHOD(mysql_string_imp::iterator_get_next,
     st_string_iterator *iterator = (st_string_iterator *)iter;
     if (iterator == nullptr) return true;
     const String *str = iterator->iterator_str;
+    my_charset_conv_mb_wc mb_wc = (str->charset())->cset->mb_wc;
     const CHARSET_INFO *cs = str->charset();
     const char *end = str->ptr() + str->length();
     *out_char = 0;
@@ -329,6 +347,11 @@ DEFINE_BOOL_METHOD(mysql_string_imp::iterator_get_next,
         cs, out_char, pointer_cast<const uchar *>(iterator->iterator_ptr),
         pointer_cast<const uchar *>(end)));
     iterator->ctype = *out_char;
+    iterator->value_status =
+        (*mb_wc)(str->charset(), &iterator->value,
+                 pointer_cast<const uchar *>(iterator->iterator_ptr),
+                 pointer_cast<const uchar *>(end));
+    if (iterator->value_status <= 0) iterator->value = 0;
     tmp_len = (char_len > 0 ? char_len : (char_len < 0 ? -char_len : 1));
     if (iterator->iterator_ptr + tmp_len > end)
       return true;
@@ -384,6 +407,20 @@ DEFINE_BOOL_METHOD(mysql_string_imp::is_digit,
     if (iterator == nullptr) return true;
     *out = (iterator->ctype & _MY_NMR);
     return false;
+  } catch (...) {
+    mysql_components_handle_std_exception(__func__);
+  }
+  return true;
+}
+
+DEFINE_BOOL_METHOD(mysql_string_imp::get,
+                   (my_h_string_iterator iter, ulong *out)) {
+  try {
+    if (out == nullptr) return true;
+    st_string_iterator *iterator = (st_string_iterator *)iter;
+    if (iterator == nullptr) return true;
+    *out = iterator->value;
+    return (iterator->value_status <= 0);
   } catch (...) {
     mysql_components_handle_std_exception(__func__);
   }

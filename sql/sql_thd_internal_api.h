@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -290,83 +291,4 @@ bool thd_is_bootstrap_thread(THD *thd);
 bool thd_is_dd_update_stmt(const THD *thd);
 
 my_thread_id thd_thread_id(const THD *thd);
-
-/**
-  Method to disable resource groups.
-
-  @param   reason    Reason to disable resource groups.
-*/
-void disable_resource_groups(const char *reason);
-
-/**
-  Method to bind system thread to SYS_internal resource group.
-
-  @note This method is invoked by only thread pool to set SYS_internal resource
-        group to query worker thread.
-
-  @returns false on success and true on error.
-*/
-bool bind_thread_to_sys_internal_resource_group();
-
-/**
-  Bind THD (user) resource group to a system thread.
-
-  @note This method is invoked by only thread pool to bind user resource group
-        to a query worker thread. Method is optimised for the thread pool usage.
-
-
-  @param         thd                                Thread handle.
-  @param[in,out] saved_thd_resource_grp             THD resource group applied
-                                                    to system thread before(if
-                                                    any).
-  @param[in,out] saved_thd_resource_group_version   Version of a resource group
-                                                    in-memory instance saved
-                                                    with a system thread.
-
-  @returns false on success and true on error.
-*/
-bool bind_system_thread_to_thd_resource_group(
-    THD *thd, void **saved_thd_resource_grp,
-    uint *saved_thd_resource_group_version);
-
-/**
-  Unbind THD (user) resource group attached to a system thread.
-
-  @note This method is invoked by only thread pool to unbind user resource group
-        from a query worker thread. Method is optimised for the thread pool
-        usage.
-
-  @param          thd                               Thread handle.
-  @param[in,out]  saved_thd_resource_grp            THD resource group applied
-                                                    to system thread before(if
-                                                    any).
-  @param[out]     saved_thd_resource_group_version  Version of a resource group
-                                                    in-memory instance saved
-                                                    with a system thread.
-
-  @returns false on success and true on error.
-*/
-bool unbind_system_thread_from_thd_resource_group(
-    THD *thd, void **saved_thd_resource_grp,
-    uint *saved_thd_resource_group_version);
-
-/**
-  Release THD resource group saved with a system thread.
-
-  @note This method is invoked by only thread pool to release resource group
-        saved with a system thread.
-
-  @param[in,out]  saved_thd_resource_grp            THD resource group saved
-                                                    with a system thread (if
-                                                    any).
-  @param[out]     saved_thd_resource_group_version  Version of a resource group
-                                                    in-memory instance saved
-                                                    with a system thread.
-  @param          only_if_defunct                   If set to true then THD
-                                                    resource group is released
-                                                    only if it is defunct.
-*/
-bool release_saved_thd_resource_group(void **saved_thd_resource_grp,
-                                      uint *saved_thd_resource_group_version,
-                                      bool only_if_defunct);
 #endif  // SQL_THD_INTERNAL_API_INCLUDED

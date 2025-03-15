@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -63,6 +64,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "rem0cmp.h"
 #include "srv0srv.h"
 #include "srv0start.h"
+#include "ut0math.h"
 
 /** Following are the InnoDB system tables. The positions in
 this array are referenced by enum dict_system_table_id. */
@@ -1621,28 +1623,17 @@ static inline space_id_t dict_check_sys_tables(bool validate) {
   return max_space_id;
 }
 
-/** Loads definitions for table columns. */
-static void dict_load_columns(dict_table_t *table, /*!< in/out: table */
-                              mem_heap_t *heap)    /*!< in/out: memory heap
-                                                   for temporary storage */
-{
-  dict_table_t *sys_columns;
-  dict_index_t *sys_index;
-  btr_pcur_t pcur;
-  dtuple_t *tuple;
-  dfield_t *dfield;
-  const rec_t *rec;
-  byte *buf;
-  ulint i;
-  mtr_t mtr;
-  ulint n_skipped = 0;
-
+/** Load columns in an innodb cached table object from SYS_COLUMNS table.
+@param[in, out]  table  Table cache object
+@param[in, out]  heap   memory heap for temporary storage */
+static void dict_load_columns(dict_table_t *table, mem_heap_t *heap) {
   ut_ad(dict_sys_mutex_own());
 
+  mtr_t mtr;
   mtr_start(&mtr);
 
-  sys_columns = dict_table_get_low("SYS_COLUMNS");
-  sys_index = UT_LIST_GET_FIRST(sys_columns->indexes);
+  dict_table_t *sys_columns = dict_table_get_low("SYS_COLUMNS");
+  dict_index_t *sys_index = UT_LIST_GET_FIRST(sys_columns->indexes);
   ut_ad(!dict_table_is_comp(sys_columns));
 
   ut_ad(name_of_col_is(sys_columns, sys_index, DICT_FLD__SYS_COLUMNS__NAME,
@@ -1650,27 +1641,30 @@ static void dict_load_columns(dict_table_t *table, /*!< in/out: table */
   ut_ad(name_of_col_is(sys_columns, sys_index, DICT_FLD__SYS_COLUMNS__PREC,
                        "PREC"));
 
-  tuple = dtuple_create(heap, 1);
-  dfield = dtuple_get_nth_field(tuple, 0);
+  dtuple_t *tuple = dtuple_create(heap, 1);
+  dfield_t *dfield = dtuple_get_nth_field(tuple, 0);
 
-  buf = static_cast<byte *>(mem_heap_alloc(heap, 8));
+  byte *buf = static_cast<byte *>(mem_heap_alloc(heap, 8));
   mach_write_to_8(buf, table->id);
 
   dfield_set_data(dfield, buf, 8);
   dict_index_copy_types(tuple, sys_index, 1);
 
+  btr_pcur_t pcur;
   pcur.open_on_user_rec(sys_index, tuple, PAGE_CUR_GE, BTR_SEARCH_LEAF, &mtr,
                         UT_LOCATION_HERE);
 
   ut_ad(table->n_t_cols == static_cast<ulint>(table->n_cols) +
                                static_cast<ulint>(table->n_v_cols));
 
-  for (i = 0; i + DATA_N_SYS_COLS < table->n_t_cols + n_skipped; i++) {
+  size_t non_v_cols = 0;
+  size_t n_skipped = 0;
+  for (size_t i = 0; i + DATA_N_SYS_COLS < table->n_t_cols + n_skipped; i++) {
     const char *err_msg;
     const char *name = nullptr;
     ulint nth_v_col = ULINT_UNDEFINED;
 
-    rec = pcur.get_rec();
+    const rec_t *rec = pcur.get_rec();
 
     ut_a(pcur.is_on_user_rec());
 
@@ -1682,6 +1676,11 @@ static void dict_load_columns(dict_table_t *table, /*!< in/out: table */
       goto next_rec;
     } else if (err_msg) {
       ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_195) << err_msg;
+    }
+
+    if (nth_v_col == ULINT_UNDEFINED) {
+      /* Not a virtual column */
+      non_v_cols++;
     }
 
     /* Note: Currently we have one DOC_ID column that is
@@ -1703,9 +1702,11 @@ static void dict_load_columns(dict_table_t *table, /*!< in/out: table */
       during upgrade because fts tables will be renamed
       as part of upgrade. These tables will be added
       to fts optimize queue when they are opened. */
-      if (table->fts == nullptr && !srv_is_upgrade_mode) {
+      if (table->fts == nullptr) {
         table->fts = fts_create(table);
-        fts_optimize_add_table(table);
+        if (!srv_is_upgrade_mode) {
+          fts_optimize_add_table(table);
+        }
       }
 
       ut_a(table->fts->doc_col == ULINT_UNDEFINED);
@@ -1727,6 +1728,11 @@ static void dict_load_columns(dict_table_t *table, /*!< in/out: table */
 
   pcur.close();
   mtr_commit(&mtr);
+
+  /* The table is getting upgraded from 5.7 where there was no row version */
+  table->initial_col_count = table->current_col_count = table->total_col_count =
+      non_v_cols;
+  table->current_row_version = 0;
 }
 
 /** Loads definitions for index fields.
@@ -2923,7 +2929,7 @@ names which must be loaded
 subsequently to load all the
 foreign key constraints. */
 {
-  ulint tuple_buf[(DTUPLE_EST_ALLOC(1) + sizeof(ulint) - 1) / sizeof(ulint)];
+  ulint tuple_buf[ut::div_ceil(DTUPLE_EST_ALLOC(1), sizeof(ulint))];
   btr_pcur_t pcur;
   dtuple_t *tuple;
   dfield_t *dfield;

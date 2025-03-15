@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,7 +36,6 @@
 #include "classic_lazy_connect.h"
 #include "harness_assert.h"
 #include "mysql/harness/stdx/expected.h"
-#include "mysql/harness/tls_error.h"
 #include "mysqld_error.h"  // mysql errors
 #include "mysqlrouter/classic_protocol_message.h"
 #include "mysqlrouter/utils.h"  // to_string
@@ -106,6 +106,8 @@ static void dump_token(SqlLexer::iterator::Token tkn) {
     std::cerr << std::quoted(tkn.text);
   } else if (tkn.id == NUM) {
     std::cerr << tkn.text;
+  } else if (tkn.id == ABORT_SYM) {
+    std::cerr << "<ABORT>";
   } else if (tkn.id == END_OF_INPUT) {
     std::cerr << "<END>";
   }
@@ -321,7 +323,7 @@ static stdx::flags<StmtClassifier> classify(const std::string &stmt,
         last = tkn;
       }
 
-      if (first.id == SET_SYM) {
+      if (first.id == SET_SYM || first.id == USE_SYM) {
         if (!classified) {
           return StmtClassifier::NoStateChangeIgnoreTracker;
         } else {
@@ -380,9 +382,15 @@ static stdx::expected<void, std::error_code> send_resultset(
   }
 
   {
+    const auto forwarded_status_flags =
+        classic_protocol::status::in_transaction |
+        classic_protocol::status::in_transaction_readonly |
+        classic_protocol::status::autocommit;
+
     const auto send_res = ClassicFrame::send_msg<
-        classic_protocol::borrowed::message::server::Eof>(src_channel,
-                                                          src_protocol, {});
+        classic_protocol::borrowed::message::server::Eof>(
+        src_channel, src_protocol,
+        {src_protocol->status_flags() & forwarded_status_flags, 0});
     if (!send_res) return stdx::make_unexpected(send_res.error());
   }
 
@@ -723,12 +731,14 @@ stdx::expected<Processor::Result, std::error_code> QueryForwarder::connected() {
 
 stdx::expected<Processor::Result, std::error_code> QueryForwarder::response() {
   auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->server_channel();
-  auto src_protocol = connection()->server_protocol();
+  auto *src_channel = socket_splicer->server_channel();
+  auto *src_protocol = connection()->server_protocol();
 
   auto read_res =
       ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
-  if (!read_res) return recv_server_failed(read_res.error());
+  if (!read_res) {
+    return recv_server_failed_and_check_client_socket(read_res.error());
+  }
 
   uint8_t msg_type = src_protocol->current_msg_type().value();
 
@@ -925,8 +935,9 @@ stdx::expected<Processor::Result, std::error_code> QueryForwarder::row() {
 
 stdx::expected<Processor::Result, std::error_code> QueryForwarder::row_end() {
   auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->server_channel();
-  auto src_protocol = connection()->server_protocol();
+  auto *src_channel = socket_splicer->server_channel();
+  auto *src_protocol = connection()->server_protocol();
+  auto *dst_protocol = connection()->client_protocol();
 
   auto msg_res =
       ClassicFrame::recv_msg<classic_protocol::borrowed::message::server::Eof>(
@@ -944,6 +955,8 @@ stdx::expected<Processor::Result, std::error_code> QueryForwarder::row_end() {
         net::buffer(msg.session_changes()),
         src_protocol->shared_capabilities());
   }
+
+  dst_protocol->status_flags(msg.status_flags());
 
   if (msg.status_flags().test(
           classic_protocol::status::pos::more_results_exist)) {
@@ -969,8 +982,9 @@ stdx::expected<Processor::Result, std::error_code> QueryForwarder::row_end() {
 
 stdx::expected<Processor::Result, std::error_code> QueryForwarder::ok() {
   auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->server_channel();
-  auto src_protocol = connection()->server_protocol();
+  auto *src_channel = socket_splicer->server_channel();
+  auto *src_protocol = connection()->server_protocol();
+  auto *dst_protocol = connection()->client_protocol();
 
   auto msg_res =
       ClassicFrame::recv_msg<classic_protocol::borrowed::message::server::Ok>(
@@ -988,6 +1002,8 @@ stdx::expected<Processor::Result, std::error_code> QueryForwarder::ok() {
         net::buffer(msg.session_changes()), src_protocol->shared_capabilities(),
         stmt_classified_ & StmtClassifier::NoStateChangeIgnoreTracker);
   }
+
+  dst_protocol->status_flags(msg.status_flags());
 
   if (stmt_classified_ & StmtClassifier::StateChangeOnSuccess) {
     connection()->some_state_changed(true);

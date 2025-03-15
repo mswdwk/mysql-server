@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -193,6 +194,10 @@ class ProcessManager {
   /** @brief Gets path to the directory used as log output directory
    */
   Path get_logging_dir() const { return logging_dir_.name(); }
+
+  /** @brief Gets path set as origin
+   */
+  static const Path &get_origin() { return origin_dir_; }
 
  protected:
   virtual ~ProcessManager() = default;
@@ -388,6 +393,32 @@ class ProcessManager {
           std::chrono::milliseconds(-1),
       OutputResponder output_responder = kEmptyResponder);
 
+  /** @brief Launches a process.
+   *
+   * @param command       path to executable
+   * @param logging_file  path to logfile name
+   * @param params        array of commandline parameters to pass to the
+   * executable
+   * @param expected_exit_status expected ExitStatus
+   * @param catch_stderr  if true stderr will also be captured (combined with
+   * stdout)
+   * @param wait_notify_ready if >=0 time in milliseconds - how long the
+   * launching command should wait for the process to notify it is ready.
+   * Otherwise the caller does not want to wait for the notification.
+   * @param output_responder method to be called when the process outputs a line
+   * returning string that should be send back to the process input (if not
+   * empty)
+   *
+   * @returns handle to the launched process
+   */
+  ProcessWrapper &launch_command(
+      const std::string &command, const std::string &logging_file,
+      const std::vector<std::string> &params,
+      ExitStatus expected_exit_status = 0, bool catch_stderr = true,
+      std::chrono::milliseconds wait_notify_ready =
+          std::chrono::milliseconds(-1),
+      OutputResponder output_responder = kEmptyResponder);
+
   /** @brief Gets path to the directory containing testing data
    *         (conf files, json files).
    */
@@ -485,7 +516,6 @@ class ProcessManager {
   std::string create_state_file(const std::string &dir_name,
                                 const std::string &content);
 
-  static const Path &get_origin() { return origin_dir_; }
   static const Path &get_plugin_dir() { return plugin_dir_; }
 
   const Path &get_mysqlrouter_exec() const { return mysqlrouter_exec_; }

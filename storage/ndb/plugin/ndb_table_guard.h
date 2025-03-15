@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +32,7 @@
 #include "storage/ndb/include/ndbapi/Ndb.hpp"
 #include "storage/ndb/include/ndbapi/NdbDictionary.hpp"
 #include "storage/ndb/plugin/ndb_dbname_guard.h"
+#include "storage/ndb/plugin/ndb_sleep.h"
 
 /*
    @brief This class maintains the reference to a NDB table definition retrieved
@@ -81,9 +83,45 @@ class Ndb_table_guard {
     return;
   }
 
+  /**
+     @brief Initialize the NDB Dictionary table by loading it from NDB while
+            handling temporary errors by retrying a few times
+
+     @param dbname   The database name of table to load
+     @param tabname  The table name of table to load
+   */
   void init(const char *dbname, const char *tabname) {
     DBUG_TRACE;
     /* Don't allow init() if already initialized */
+    assert(m_ndbtab == nullptr);
+
+    int attempt = 1;
+    constexpr int retries = 10;
+    do {
+      open_table_from_NDB(dbname, tabname);
+      if (m_ndbtab) {
+        // Successfully loaded table
+        return;
+      }
+      // Expect error to be set
+      assert(m_ndberror.code != 0);
+
+      if (m_ndberror.status != NdbError::TemporaryError) {
+        // Not an error that should be retried
+        return;
+      }
+
+      attempt++;
+      ndb_retry_sleep(50);
+
+    } while (attempt < retries);
+
+    // Failed to load table
+    assert(m_ndbtab == nullptr && m_ndberror.code != 0);
+  }
+
+  void open_table_from_NDB(const char *dbname, const char *tabname) {
+    DBUG_TRACE;
     assert(m_ndbtab == nullptr);
 
     // Change to the database where the table should be found
@@ -149,6 +187,18 @@ class Ndb_table_guard {
   }
 
   const NdbError &getNdbError() const { return m_ndberror; }
+
+  /**
+     @brief Invalidate table in the global dictionary cache (if it exists)
+     without fetching table from NDB on cache miss, this saves one roundtrip.
+
+     This function is to be used to invalidate table when it's not already being
+     held open.
+  */
+  static void invalidate_table(Ndb *ndb, const char *dbname,
+                               const char *tabname) {
+    ndb->getDictionary()->invalidateTableGlobal(dbname, "def", tabname);
+  }
 };
 
 #endif

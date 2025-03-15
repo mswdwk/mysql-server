@@ -53,14 +53,18 @@ if (mysqld.global.cluster_type === undefined) {
 var nodes = function(host, port_and_state) {
   return port_and_state.map(function(current_value) {
     return [
-      current_value[0], host, current_value[0], current_value[1],
-      current_value[2]
+      current_value[0], host, current_value[1], current_value[2],
+      current_value[3]
     ];
   });
 };
 
 var cluster_nodes_online =
     nodes(mysqld.global.gr_node_host, mysqld.global.cluster_nodes);
+
+if (mysqld.global.server_version === undefined) {
+  mysqld.global.server_version = "8.0.39";
+}
 
 var options = {
   innodb_cluster_instances: cluster_nodes_online,
@@ -113,7 +117,8 @@ var router_select_cluster_type =
     auth: {
       username: mysqld.global.user,
       password: mysqld.global.password,
-    }
+    },
+    greeting: {server_version: mysqld.global.server_version}
   },
   stmts: function(stmt) {
     if (stmt === select_port.stmt) {

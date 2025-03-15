@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+Copyright (c) 2011, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -232,14 +233,15 @@ static void fts_tokenize_document_next(fts_doc_t *doc, ulint add_pos,
                                        fts_doc_t *result,
                                        st_mysql_ftparser *parser);
 
+namespace detail {
 /** Create the vector of fts_get_doc_t instances.
 @param[in,out]  cache   fts cache
 @return vector of fts_get_doc_t instances */
-static ib_vector_t *fts_get_docs_create(fts_cache_t *cache);
+ib_vector_t *fts_get_docs_create(fts_cache_t *cache);
 
 /** Free the FTS cache.
 @param[in,out]  cache to be freed */
-static void fts_cache_destroy(fts_cache_t *cache) {
+void fts_cache_destroy(fts_cache_t *cache) {
   rw_lock_free(&cache->lock);
   rw_lock_free(&cache->init_lock);
   mutex_free(&cache->optimize_lock);
@@ -257,6 +259,10 @@ static void fts_cache_destroy(fts_cache_t *cache) {
 
   mem_heap_free(cache->cache_heap);
 }
+
+}  // namespace detail
+using detail::fts_cache_destroy;
+using detail::fts_get_docs_create;
 
 /** Get a character set based on precise type.
 @param prtype precise type
@@ -599,32 +605,34 @@ void fts_add_index(dict_index_t *index, /*!< FTS index to be added */
   rw_lock_x_unlock(&cache->init_lock);
 }
 
-/** recalibrate get_doc structure after index_cache in cache->indexes changed */
-static void fts_reset_get_doc(fts_cache_t *cache) /*!< in: FTS index cache */
-{
-  fts_get_doc_t *get_doc;
-  ulint i;
+namespace detail {
 
+/** recalibrate get_doc structure after index_cache in cache->indexes changed */
+void fts_reset_get_doc(fts_cache_t *cache) /*!< in: FTS index cache */
+{
   ut_ad(rw_lock_own(&cache->init_lock, RW_LOCK_X));
 
   ib_vector_reset(cache->get_docs);
 
-  for (i = 0; i < ib_vector_size(cache->indexes); i++) {
-    fts_index_cache_t *ind_cache;
-
-    ind_cache =
+  for (unsigned long i = 0; i < ib_vector_size(cache->indexes); i++) {
+    fts_index_cache_t *ind_cache =
         static_cast<fts_index_cache_t *>(ib_vector_get(cache->indexes, i));
 
-    get_doc =
+    fts_get_doc_t *get_doc =
         static_cast<fts_get_doc_t *>(ib_vector_push(cache->get_docs, nullptr));
 
     memset(get_doc, 0x0, sizeof(*get_doc));
 
     get_doc->index_cache = ind_cache;
+    get_doc->cache = cache;
   }
 
   ut_ad(ib_vector_size(cache->get_docs) == ib_vector_size(cache->indexes));
 }
+
+}  // namespace detail
+
+using detail::fts_reset_get_doc;
 
 /** Check an index is in the table->indexes list
  @return true if it exists */
@@ -702,18 +710,22 @@ bool fts_check_cached_index(
 @param[in]      index           Index to be dropped
 @param[in]      trx             Transaction for the drop
 @param[in,out]  aux_vec         Aux table name vector
+@param[in]      adding_another  Another FTS index is to be added as part
+                                of the same transaction
 @return DB_SUCCESS or error number */
 dberr_t fts_drop_index(dict_table_t *table, dict_index_t *index, trx_t *trx,
-                       aux_name_vec_t *aux_vec) {
+                       aux_name_vec_t *aux_vec, bool adding_another) {
   ib_vector_t *indexes = table->fts->indexes;
   dberr_t err = DB_SUCCESS;
 
   ut_a(indexes);
 
-  if ((ib_vector_size(indexes) == 1 &&
-       (index ==
-        static_cast<dict_index_t *>(ib_vector_getp(table->fts->indexes, 0)))) ||
-      ib_vector_is_empty(indexes)) {
+  const bool last_index = (ib_vector_size(indexes) == 1 &&
+                           (index == static_cast<dict_index_t *>(ib_vector_getp(
+                                         table->fts->indexes, 0)))) ||
+                          ib_vector_is_empty(indexes);
+
+  if (last_index && !adding_another) {
     doc_id_t current_doc_id;
     doc_id_t first_doc_id;
 
@@ -734,7 +746,7 @@ dberr_t fts_drop_index(dict_table_t *table, dict_index_t *index, trx_t *trx,
 
       return (err);
     } else {
-      if (!(index->type & DICT_CORRUPT)) {
+      if (!(index->type & DICT_CORRUPT) && !dict_table_is_discarded(table)) {
         err = fts_empty_common_tables(trx, table);
         ut_ad(err == DB_SUCCESS);
       }
@@ -1061,7 +1073,6 @@ void fts_cache_node_add_positions(
   ulint enc_len;
   ulint last_pos;
   byte *ptr_start;
-  ulint doc_id_delta;
 
 #ifdef UNIV_DEBUG
   if (cache) {
@@ -1072,7 +1083,7 @@ void fts_cache_node_add_positions(
   ut_ad(doc_id >= node->last_doc_id);
 
   /* Calculate the space required to store the ilist. */
-  doc_id_delta = (ulint)(doc_id - node->last_doc_id);
+  const uint64_t doc_id_delta = doc_id - node->last_doc_id;
   enc_len = fts_get_encoded_len(doc_id_delta);
 
   last_pos = 0;
@@ -2520,7 +2531,8 @@ static fts_trx_table_t *fts_trx_table_create(
   ftt->table = table;
   ftt->fts_trx = fts_trx;
 
-  ftt->rows = rbt_create(sizeof(fts_trx_row_t), fts_trx_row_doc_id_cmp);
+  ftt->rows =
+      rbt_create(sizeof(fts_trx_row_t), fts_doc_id_field_cmp<fts_trx_row_t>);
 
   return (ftt);
 }
@@ -2540,7 +2552,8 @@ static fts_trx_table_t *fts_trx_table_clone(
   ftt->table = ftt_src->table;
   ftt->fts_trx = ftt_src->fts_trx;
 
-  ftt->rows = rbt_create(sizeof(fts_trx_row_t), fts_trx_row_doc_id_cmp);
+  ftt->rows =
+      rbt_create(sizeof(fts_trx_row_t), fts_doc_id_field_cmp<fts_trx_row_t>);
 
   /* Copy the rb tree values to the new savepoint. */
   rbt_merge_uniq(ftt->rows, ftt_src->rows);
@@ -2792,18 +2805,22 @@ static dberr_t fts_cmp_set_sync_doc_id(
     doc_id_t doc_id_cmp,       /*!< in: Doc ID to compare */
     bool read_only,            /*!< in: true if read the
                                 synced_doc_id only */
-    doc_id_t *doc_id)          /*!< out: larger document id
+    doc_id_t *doc_id,          /*!< out: larger document id
                                after comparing "doc_id_cmp"
                                to the one stored in CONFIG
                                table */
+    trx_t *trx = nullptr)      /*!< in: transaction in which
+                               the doc_id is retrieved and
+                               stored */
 {
-  trx_t *trx;
   pars_info_t *info;
   dberr_t error;
   fts_table_t fts_table;
   que_t *graph = nullptr;
   fts_cache_t *cache = table->fts->cache;
   char table_name[MAX_FULL_NAME_LEN];
+  bool trx_allocated;
+  trx_savept_t savept;
 retry:
   ut_a(table->fts->doc_col != ULINT_UNDEFINED);
 
@@ -2814,7 +2831,13 @@ retry:
 
   fts_table.parent = table->name.m_name;
 
-  trx = trx_allocate_for_background();
+  trx_allocated = false;
+  if (trx == nullptr) {
+    trx = trx_allocate_for_background();
+    trx_allocated = true;
+  } else {
+    savept = trx_savept_take(trx);
+  }
 
   trx->op_info = "update the next FTS document id";
 
@@ -2879,23 +2902,36 @@ retry:
 func_exit:
 
   if (error == DB_SUCCESS) {
-    fts_sql_commit(trx);
+    if (trx_allocated) {
+      fts_sql_commit(trx);
+    }
   } else {
     *doc_id = 0;
 
     ib::error(ER_IB_MSG_471) << "(" << ut_strerr(error)
                              << ") while getting"
                                 " next doc id.";
-    fts_sql_rollback(trx);
+    if (trx_allocated) {
+      fts_sql_rollback(trx);
+    } else {
+      trx_rollback_to_savepoint(trx, &savept);
+    }
 
     if (error == DB_DEADLOCK) {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(FTS_DEADLOCK_RETRY_WAIT_MS));
+      if (trx_allocated) {
+        /* free trx before retry */
+        trx_free_for_background(trx);
+        trx = nullptr;
+      }
       goto retry;
     }
   }
 
-  trx_free_for_background(trx);
+  if (trx_allocated) {
+    trx_free_for_background(trx);
+  }
 
   return (error);
 }
@@ -4004,7 +4040,7 @@ dberr_t fts_write_node(trx_t *trx,             /*!< in: transaction */
 
   ut_a(ib_vector_size(doc_ids) > 0);
 
-  ib_vector_sort(doc_ids, fts_update_doc_id_cmp);
+  ib_vector_sort(doc_ids, fts_doc_id_field_cmp<fts_update_t>);
 
   info = pars_info_create();
 
@@ -4248,7 +4284,7 @@ static void fts_sync_index_reset(fts_index_cache_t *index_cache) {
   /* After each Sync, update the CONFIG table about the max doc id
   we just sync-ed to index table */
   error = fts_cmp_set_sync_doc_id(sync->table, sync->max_doc_id, false,
-                                  &last_doc_id);
+                                  &last_doc_id, trx);
 
   /* Get the list of deleted documents that are either in the
   cache or were headed there but were deleted before the add
@@ -4266,6 +4302,7 @@ static void fts_sync_index_reset(fts_index_cache_t *index_cache) {
   rw_lock_x_unlock(&cache->lock);
 
   if (error == DB_SUCCESS) {
+    DBUG_EXECUTE_IF("fts_crash_before_commit_sync", { DBUG_SUICIDE(); });
     fts_sql_commit(trx);
 
   } else if (error != DB_SUCCESS) {
@@ -4829,10 +4866,11 @@ static void fts_tokenize_document_next(fts_doc_t *doc, ulint add_pos,
   }
 }
 
+namespace detail {
 /** Create the vector of fts_get_doc_t instances.
 @param[in,out]  cache   fts cache
 @return vector of fts_get_doc_t instances */
-static ib_vector_t *fts_get_docs_create(fts_cache_t *cache) {
+ib_vector_t *fts_get_docs_create(fts_cache_t *cache) {
   ib_vector_t *get_docs;
 
   ut_ad(rw_lock_own(&cache->init_lock, RW_LOCK_X));
@@ -4861,6 +4899,7 @@ static ib_vector_t *fts_get_docs_create(fts_cache_t *cache) {
 
   return (get_docs);
 }
+}  // namespace detail
 
 /********************************************************************
 Release any resources held by the fts_get_doc_t instances. */
@@ -6108,7 +6147,7 @@ static bool fts_init_recover_doc(void *row,      /*!< in: sel_node_t* */
   fts_doc_init(&doc);
   doc.found = true;
 
-  ut_ad(cache);
+  ut_a(cache);
 
   /* Copy each indexed column content into doc->text.f_str */
   while (exp) {
@@ -6134,7 +6173,7 @@ static bool fts_init_recover_doc(void *row,      /*!< in: sel_node_t* */
       continue;
     }
 
-    ut_ad(get_doc);
+    ut_a(get_doc);
 
     if (!get_doc->index_cache->charset) {
       get_doc->index_cache->charset = fts_get_charset(dfield->type.prtype);

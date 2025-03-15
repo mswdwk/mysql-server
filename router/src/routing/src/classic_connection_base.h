@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,6 +38,7 @@
 #include "connection.h"  // MySQLRoutingConnectionBase
 #include "mysql/harness/net_ts/executor.h"
 #include "mysql/harness/net_ts/timer.h"
+#include "mysqlrouter/classic_protocol_constants.h"
 #include "mysqlrouter/classic_protocol_message.h"
 #include "mysqlrouter/classic_protocol_session_track.h"
 #include "mysqlrouter/connection_pool.h"
@@ -49,6 +51,13 @@
  */
 class ClassicProtocolState : public ProtocolStateBase {
  public:
+  enum class HandshakeState {
+    kConnected,
+    kServerGreeting,
+    kClientGreeting,
+    kFinished,
+  };
+
   ClassicProtocolState() = default;
 
   ClassicProtocolState(
@@ -159,12 +168,24 @@ class ClassicProtocolState : public ProtocolStateBase {
     sent_attributes_ = std::move(attrs);
   }
 
+  HandshakeState handshake_state() const { return handshake_state_; }
+
+  void handshake_state(HandshakeState state) { handshake_state_ = state; }
+
   using PreparedStatements = std::unordered_map<uint32_t, PreparedStatement>;
 
   const PreparedStatements &prepared_statements() const {
     return prepared_stmts_;
   }
   PreparedStatements &prepared_statements() { return prepared_stmts_; }
+
+  classic_protocol::status::value_type status_flags() const {
+    return status_flags_;
+  }
+
+  void status_flags(classic_protocol::status::value_type val) {
+    status_flags_ = val;
+  }
 
  private:
   classic_protocol::capabilities::value_type server_caps_{};
@@ -188,6 +209,11 @@ class ClassicProtocolState : public ProtocolStateBase {
   std::string auth_method_data_;
 
   PreparedStatements prepared_stmts_;
+
+  // status flags of the last statement.
+  classic_protocol::status::value_type status_flags_{};
+
+  HandshakeState handshake_state_{HandshakeState::kConnected};
 };
 
 class MysqlRoutingClassicConnectionBase
@@ -216,6 +242,7 @@ class MysqlRoutingClassicConnectionBase
                                     std::make_unique<ClassicProtocolState>()})},
         read_timer_{socket_splicer()->client_conn().connection()->io_ctx()},
         connect_timer_{socket_splicer()->client_conn().connection()->io_ctx()} {
+    client_address(socket_splicer_->client_conn().endpoint());
   }
 
  public:
@@ -253,14 +280,6 @@ class MysqlRoutingClassicConnectionBase
 
   SslMode dest_ssl_mode() const {
     return this->socket_splicer()->dest_ssl_mode();
-  }
-
-  std::string get_client_address() const override {
-    return socket_splicer()->client_conn().endpoint();
-  }
-
-  std::string get_server_address() const override {
-    return socket_splicer()->server_conn().endpoint();
   }
 
   void disconnect() override;
@@ -323,10 +342,10 @@ class MysqlRoutingClassicConnectionBase
   //     Server::Ok -> Command
   //   Command ->
   //
-  std::vector<std::unique_ptr<Processor>> processors_;
+  std::vector<std::unique_ptr<BasicProcessor>> processors_;
 
  public:
-  void push_processor(std::unique_ptr<Processor> processor) {
+  void push_processor(std::unique_ptr<BasicProcessor> processor) {
     return processors_.push_back(std::move(processor));
   }
 
@@ -348,6 +367,8 @@ class MysqlRoutingClassicConnectionBase
   void async_send_server(Function next);
 
   void async_recv_server(Function next);
+
+  void async_recv_both(Function next);
 
   void async_send_client_and_finish();
 
@@ -449,12 +470,7 @@ class MysqlRoutingClassicConnectionBase
 
   bool authenticated_{false};
 
-  bool client_greeting_sent_{false};
-
  public:
-  bool client_greeting_sent() const { return client_greeting_sent_; }
-  void client_greeting_sent(bool sent) { client_greeting_sent_ = sent; }
-
   /**
    * if the router is sending the initial server-greeting.
    *
@@ -477,6 +493,14 @@ class MysqlRoutingClassicConnectionBase
   RouteDestination *destinations() { return route_destination_; }
   Destinations &current_destinations() { return destinations_; }
 
+  void collation_connection_maybe_dirty(bool val) {
+    collation_connection_maybe_dirty_ = val;
+  }
+
+  bool collation_connection_maybe_dirty() const {
+    return collation_connection_maybe_dirty_;
+  }
+
  private:
   RouteDestination *route_destination_;
   Destinations destinations_;
@@ -494,6 +518,8 @@ class MysqlRoutingClassicConnectionBase
   std::optional<classic_protocol::session_track::TransactionCharacteristics>
       trx_characteristics_;
   bool some_state_changed_{false};
+
+  bool collation_connection_maybe_dirty_{false};
 
   bool requires_tls_{true};
 

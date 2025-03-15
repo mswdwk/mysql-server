@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -88,24 +89,13 @@ bool IO_CACHE_ostream::sync() {
   return mysql_file_sync(m_io_cache.file, MYF(MY_WME)) != 0;
 }
 
-Compressed_ostream::Compressed_ostream() : m_compressor(nullptr) {}
-
-Compressed_ostream::~Compressed_ostream() = default;
-
-binary_log::transaction::compression::Compressor *
-Compressed_ostream::get_compressor() {
-  return m_compressor;
-}
-
-void Compressed_ostream::set_compressor(
-    binary_log::transaction::compression::Compressor *c) {
-  m_compressor = c;
-}
-
 bool Compressed_ostream::write(const unsigned char *buffer, my_off_t length) {
-  if (m_compressor == nullptr) return true;
-  auto res{false};
-  auto left{0};
-  std::tie(left, res) = m_compressor->compress(buffer, length);
-  return (res || left > 0);
+  DBUG_TRACE;
+  m_compressor->feed(buffer, length);
+  m_status = m_compressor->compress(m_managed_buffer_sequence);
+  return m_status != Status_t::success;
+}
+
+Compressed_ostream::Status_t Compressed_ostream::get_status() const {
+  return m_status;
 }

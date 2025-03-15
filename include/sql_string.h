@@ -1,18 +1,19 @@
 #ifndef SQL_STRING_INCLUDED
 #define SQL_STRING_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -43,6 +44,7 @@
 #include "memory_debugging.h"
 #include "my_alloc.h"
 #include "my_compiler.h"
+#include "my_sys.h"
 
 #include "my_inttypes.h"
 #include "mysql/components/services/bits/psi_bits.h"
@@ -607,6 +609,35 @@ class String {
   */
   char *dup(MEM_ROOT *root) const;
 };
+
+/**
+  Checks that the source string can be just copied to the destination string
+  without conversion.
+
+  @param arg_length     Length of string to copy.
+  @param from_cs        Character set to copy from
+  @param to_cs          Character set to copy to
+  @param *offset	Returns number of unaligned characters.
+
+  @returns true if conversion is required, false otherwise.
+
+  @note
+  to_cs may be nullptr for "no conversion" if the system variable
+  character_set_results is NULL.
+*/
+
+inline bool String::needs_conversion(size_t arg_length,
+                                     const CHARSET_INFO *from_cs,
+                                     const CHARSET_INFO *to_cs,
+                                     size_t *offset) {
+  *offset = 0;
+  if (to_cs == nullptr || (to_cs == &my_charset_bin) || from_cs == to_cs ||
+      my_charset_same(from_cs, to_cs) ||
+      ((from_cs == &my_charset_bin) &&
+       (0 == (*offset = (arg_length % to_cs->mbminlen)))))
+    return false;
+  return true;
+}
 
 static inline void swap(String &a, String &b) noexcept { a.swap(b); }
 

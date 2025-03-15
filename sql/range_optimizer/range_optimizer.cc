@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -731,7 +732,7 @@ int test_quick_select(THD *thd, MEM_ROOT *return_mem_root,
                                        Opt_trace_context::RANGE_OPTIMIZER);
       AccessPath *range_path = get_key_scans_params(
           thd, &param, tree, false, true, interesting_order,
-          skip_records_in_range, best_cost, needed_reg);
+          skip_records_in_range, best_cost, /*ror_only=*/false, needed_reg);
 
       /* Get best 'range' plan and prepare data for making other plans */
       if (range_path) {
@@ -1083,7 +1084,8 @@ static AccessPath *get_best_disjunct_quick(
       Opt_trace_object trace_idx(trace);
       if (!(*cur_child = get_key_scans_params(
                 thd, param, *tree_it, true, false, ORDER_NOT_RELEVANT,
-                skip_records_in_range, read_cost, needed_reg))) {
+                skip_records_in_range, read_cost, /*ror_only=*/false,
+                needed_reg))) {
         /*
           One of index scans in this index_merge is more expensive than entire
           table read for another available option. The entire index_merge (and
@@ -1225,11 +1227,34 @@ static AccessPath *get_best_disjunct_quick(
     return imerge_path;
   }
 
-  AccessPath *roru = get_ror_union_path(
+  /* Collect best 'range' scan for each of disjuncts, and, while doing so,
+     consider only ROR scans. */
+  assert(imerge->trees.size() == n_child_scans);
+  {
+    Opt_trace_array to_merge_ror(trace, "indexes_to_merge_in_rowid_order");
+    for (size_t i = 0; i < n_child_scans; ++i) {
+      Opt_trace_object trace_idx(trace);
+      roru_read_plans[i] = get_key_scans_params(
+          thd, param, imerge->trees[i], true, false, ORDER_NOT_RELEVANT,
+          skip_records_in_range, read_cost, /*ror_only=*/true, needed_reg);
+      if (roru_read_plans[i] == nullptr) return imerge_path;
+    }
+  }
+
+  AccessPath *ror_union_path = get_ror_union_path(
       thd, param, table, index_merge_intersect_allowed, needed_fields, imerge,
       read_cost, force_index_merge, {roru_read_plans, n_child_scans},
-      range_scans, &trace_best_disjunct);
-  return (roru != nullptr) ? roru : imerge_path;
+      roru_read_plans, &trace_best_disjunct);
+
+  if (ror_union_path == nullptr) {
+    // No ROR-union plan found.
+    return imerge_path;
+  }
+  if (imerge_path != nullptr && imerge_path->cost < ror_union_path->cost) {
+    // The best sort-union is cheaper than the best ROR-union.
+    return imerge_path;
+  }
+  return ror_union_path;
 }
 
 bool comparable_in_index(Item *cond_func, const Field *field,
@@ -1378,6 +1403,9 @@ int index_next_different(bool is_index_scan, handler *file,
                          KEY_PART_INFO *key_part, uchar *record,
                          const uchar *group_prefix, uint group_prefix_len,
                          uint group_key_parts) {
+  // In order to find next different key value, the old end_range should be
+  // cleared.
+  file->set_end_range(nullptr, handler::RANGE_SCAN_ASC);
   if (is_index_scan) {
     int result = 0;
 

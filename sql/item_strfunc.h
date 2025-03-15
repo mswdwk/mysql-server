@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -331,6 +332,9 @@ class Item_func_random_bytes : public Item_str_func {
   String *val_str(String *a) override;
 
   const char *func_name() const override { return "random_bytes"; }
+  table_map get_initial_pseudo_tables() const override {
+    return RAND_TABLE_BIT;
+  }
 };
 
 class Item_func_concat : public Item_str_func {
@@ -608,7 +612,7 @@ class Item_func_database : public Item_func_sysconst {
 
   String *val_str(String *) override;
   bool resolve_type(THD *) override {
-    set_data_type_string(uint32{MAX_FIELD_NAME});
+    set_data_type_string(uint32{NAME_CHAR_LEN});
     set_nullable(true);
     return false;
   }
@@ -646,7 +650,8 @@ class Item_func_user : public Item_func_sysconst {
         pointer_cast<Check_function_as_value_generator_parameters *>(
             checker_args);
     func_arg->banned_function_name = func_name();
-    return true;
+    return ((func_arg->source == VGS_GENERATED_COLUMN) ||
+            (func_arg->source == VGS_CHECK_CONSTRAINT));
   }
   bool resolve_type(THD *) override {
     set_data_type_string(uint32{USERNAME_CHAR_LENGTH + HOSTNAME_LENGTH + 1U});
@@ -719,13 +724,9 @@ class Item_func_make_set final : public Item_str_func {
 
   bool itemize(Parse_context *pc, Item **res) override;
   String *val_str(String *str) override;
-  bool fix_fields(THD *thd, Item **ref) override {
-    assert(fixed == 0);
-    bool res = ((!item->fixed && item->fix_fields(thd, &item)) ||
-                item->check_cols(1) || Item_func::fix_fields(thd, ref));
-    set_nullable(is_nullable() || item->is_nullable());
-    return res;
-  }
+  bool fix_fields(THD *thd, Item **ref) override;
+  void fix_after_pullout(Query_block *parent_query_block,
+                         Query_block *removed_query_block) override;
   void split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   bool resolve_type(THD *) override;

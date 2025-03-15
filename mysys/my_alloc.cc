@@ -1,14 +1,15 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -34,6 +35,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <sys/types.h>
+#include <iterator>
 
 #include "my_alloc.h"
 #include "my_compiler.h"
@@ -90,6 +92,7 @@ MEM_ROOT::Block *MEM_ROOT::AllocBlock(size_t wanted_length,
     if (m_error_handler) (m_error_handler)();
     return nullptr;
   }
+  TRASH(new_block, bytes_to_alloc);
   new_block->end = pointer_cast<char *>(new_block) + bytes_to_alloc;
 
   m_allocated_size += length;
@@ -200,6 +203,7 @@ void MEM_ROOT::ClearForReuse() {
   Block *start = m_current_block->prev;
   m_current_block->prev = nullptr;
   m_allocated_size = m_current_free_end - m_current_free_start;
+  TRASH(m_current_free_start, m_allocated_size);
 
   FreeBlocks(start);
 }
@@ -209,6 +213,7 @@ void MEM_ROOT::FreeBlocks(Block *start) {
   // touch it after we've started freeing.
   for (Block *block = start; block != nullptr;) {
     Block *prev = block->prev;
+    TRASH(block, std::distance(pointer_cast<char *>(block), block->end));
     my_free(block);
     block = prev;
   }

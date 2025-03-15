@@ -64,6 +64,13 @@ if (mysqld.global.gr_pos === undefined) {
   mysqld.global.gr_pos = 0;
 }
 
+if (mysqld.global.server_version === undefined) {
+  // Let's keep the default server version as some known compatible version.
+  // If there is a need to some specific compatibility checks, this should be
+  // overwritten from the test.
+  mysqld.global.server_version = "8.0.39";
+}
+
 var members = gr_memberships.gr_members(
     mysqld.global.gr_node_host, mysqld.global.gr_nodes);
 
@@ -72,6 +79,12 @@ const online_gr_nodes = members
                               return (memb[3] === "ONLINE");
                             })
                             .length;
+
+const recovering_gr_nodes = members
+                                .filter(function(memb, indx) {
+                                  return (memb[3] === "RECOVERING");
+                                })
+                                .length;
 
 const member_state = members[mysqld.global.gr_pos] ?
     members[mysqld.global.gr_pos][3] :
@@ -82,6 +95,7 @@ var options = {
   gr_member_state: member_state,
   gr_members_all: members.length,
   gr_members_online: online_gr_nodes,
+  gr_members_recovering: recovering_gr_nodes,
   innodb_cluster_instances: gr_memberships.cluster_nodes(
       mysqld.global.gr_node_host, mysqld.global.cluster_nodes),
   gr_id: mysqld.global.gr_id,
@@ -131,7 +145,8 @@ var router_start_transaction =
     auth: {
       username: mysqld.global.user,
       password: mysqld.global.password,
-    }
+    },
+    greeting: {server_version: mysqld.global.server_version}
   },
   stmts: function(stmt) {
     if (common_responses.hasOwnProperty(stmt)) {

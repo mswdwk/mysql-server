@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -13,12 +13,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -285,7 +286,7 @@ lock_loop:
   os_rmb;
   while (i < srv_n_spin_wait_rounds && lock->lock_word <= 0) {
     if (srv_spin_wait_delay) {
-      ut_delay(ut::random_from_interval(0, srv_spin_wait_delay));
+      ut_delay(ut::random_from_interval_fast(0, srv_spin_wait_delay));
     }
 
     i++;
@@ -381,7 +382,7 @@ static inline void rw_lock_x_lock_wait_func(rw_lock_t *lock,
 
   while (lock->lock_word < threshold) {
     if (srv_spin_wait_delay) {
-      ut_delay(ut::random_from_interval(0, srv_spin_wait_delay));
+      ut_delay(ut::random_from_interval_fast(0, srv_spin_wait_delay));
     }
 
     if (i < srv_n_spin_wait_rounds) {
@@ -597,7 +598,7 @@ lock_loop:
     os_rmb;
     while (i < srv_n_spin_wait_rounds && lock->lock_word <= X_LOCK_HALF_DECR) {
       if (srv_spin_wait_delay) {
-        ut_delay(ut::random_from_interval(0, srv_spin_wait_delay));
+        ut_delay(ut::random_from_interval_fast(0, srv_spin_wait_delay));
       }
 
       i++;
@@ -662,7 +663,7 @@ lock_loop:
     os_rmb;
     while (i < srv_n_spin_wait_rounds && lock->lock_word <= X_LOCK_HALF_DECR) {
       if (srv_spin_wait_delay) {
-        ut_delay(ut::random_from_interval(0, srv_spin_wait_delay));
+        ut_delay(ut::random_from_interval_fast(0, srv_spin_wait_delay));
       }
 
       i++;

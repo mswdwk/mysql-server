@@ -1,18 +1,19 @@
 #ifndef ITEM_CMPFUNC_INCLUDED
 #define ITEM_CMPFUNC_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -245,6 +246,8 @@ class Arg_comparator {
 
   Arg_comparator *get_child_comparators() const { return comparators; }
 
+  bool compare_as_json() const { return func == &Arg_comparator::compare_json; }
+
   /// @returns true if the class has decided that values should be extracted
   ///   from the Items using function pointers set up by this class.
   bool use_custom_value_extractors() const {
@@ -329,7 +332,7 @@ class Item_bool_func : public Item_int_func {
   }
   uint decimal_precision() const override { return 1; }
   bool created_by_in2exists() const override { return m_created_by_in2exists; }
-  void set_created_by_in2exists() { m_created_by_in2exists = true; }
+  void set_created_by_in2exists();
 
   static const char *bool_transform_names[10];
   /**
@@ -1629,6 +1632,7 @@ class in_vector {
     @return true if any null values was found, false otherwise.
   */
   bool fill(Item **items, uint item_count);
+  virtual void cleanup() {}
 
  private:
   virtual void set(uint pos, Item *item) = 0;
@@ -1655,6 +1659,7 @@ class in_string final : public in_vector {
   }
   bool find_item(Item *item) override;
   bool compare_elems(uint pos1, uint pos2) const override;
+  void cleanup() override;
 
  private:
   void set(uint pos, Item *item) override;
@@ -1823,13 +1828,14 @@ class cmp_item {
   virtual void store_value_by_template(cmp_item *, Item *item) {
     store_value(item);
   }
+  virtual void set_null_value(bool nv) = 0;
 };
 
 /// cmp_item which stores a scalar (i.e. non-ROW).
 class cmp_item_scalar : public cmp_item {
  protected:
   bool m_null_value;  ///< If stored value is NULL
-  void set_null_value(bool nv) { m_null_value = nv; }
+  void set_null_value(bool nv) override { m_null_value = nv; }
 };
 
 class cmp_item_string final : public cmp_item_scalar {
@@ -2194,6 +2200,11 @@ class cmp_item_row : public cmp_item {
   int compare(const cmp_item *arg) const override;
   cmp_item *make_same() override;
   void store_value_by_template(cmp_item *tmpl, Item *) override;
+  void set_null_value(bool nv) override {
+    for (uint i = 0; i < n; i++) {
+      comparators[i]->set_null_value(nv);
+    }
+  }
 
  private:
   /**

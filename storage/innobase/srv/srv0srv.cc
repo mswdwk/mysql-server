@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 Copyright (c) 2008, 2009 Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -21,12 +21,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -1676,8 +1677,9 @@ void srv_export_innodb_status(void) {
   export_vars.innodb_row_lock_time = srv_stats.n_lock_wait_time / 1000;
 
   if (srv_stats.n_lock_wait_count > 0) {
-    export_vars.innodb_row_lock_time_avg = (ulint)(
-        srv_stats.n_lock_wait_time / 1000 / srv_stats.n_lock_wait_count);
+    export_vars.innodb_row_lock_time_avg =
+        (ulint)(srv_stats.n_lock_wait_time / 1000 /
+                srv_stats.n_lock_wait_count);
 
   } else {
     export_vars.innodb_row_lock_time_avg = 0;
@@ -2142,13 +2144,7 @@ static void srv_update_cpu_usage() {
     return;
   }
 
-  int n_cpu = 0;
-  constexpr int MAX_CPU_N = 128;
-  for (int i = 0; i < MAX_CPU_N; ++i) {
-    if (CPU_ISSET(i, &cs)) {
-      ++n_cpu;
-    }
-  }
+  const int n_cpu = CPU_COUNT(&cs);
 
   srv_cpu_usage.n_cpu = n_cpu;
   MONITOR_SET(MONITOR_CPU_N, int64_t(n_cpu));
@@ -2842,11 +2838,7 @@ void srv_worker_thread() {
 
   THD *thd = create_internal_thd();
 
-  rw_lock_x_lock(&purge_sys->latch, UT_LOCATION_HERE);
-
-  purge_sys->thds.insert(thd);
-
-  rw_lock_x_unlock(&purge_sys->latch);
+  purge_sys->is_this_a_purge_thread = true;
 
   slot = srv_reserve_slot(SRV_WORKER);
 
@@ -3086,11 +3078,7 @@ void srv_purge_coordinator_thread() {
 
   THD *thd = create_internal_thd();
 
-  rw_lock_x_lock(&purge_sys->latch, UT_LOCATION_HERE);
-
-  purge_sys->thds.insert(thd);
-
-  rw_lock_x_unlock(&purge_sys->latch);
+  purge_sys->is_this_a_purge_thread = true;
 
   ulint n_total_purged = ULINT_UNDEFINED;
 

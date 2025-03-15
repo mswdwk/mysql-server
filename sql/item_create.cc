@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -2224,9 +2225,9 @@ Item *create_temporal_literal(THD *thd, const char *str, size_t length,
   if (item) return item;
 
   if (send_error) {
-    const char *typestr = (type == MYSQL_TYPE_DATE)
-                              ? "DATE"
-                              : (type == MYSQL_TYPE_TIME) ? "TIME" : "DATETIME";
+    const char *typestr = (type == MYSQL_TYPE_DATE)   ? "DATE"
+                          : (type == MYSQL_TYPE_TIME) ? "TIME"
+                                                      : "DATETIME";
     ErrConvString err(str, length, thd->variables.character_set_client);
     my_error(ER_WRONG_VALUE, MYF(0), typestr, err.ptr());
   }

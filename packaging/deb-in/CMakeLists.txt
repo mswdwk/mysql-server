@@ -1,15 +1,16 @@
-# Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -56,6 +57,13 @@ ENDIF()
 
 # Change uppercase first letter of Ubuntu/Debian
 string(TOLOWER "${DEB_ID}" DEB_ID)
+
+# Ubuntu 20.04 and 22.04 has too old zlib
+IF(DEB_CODENAME STREQUAL "focal" OR DEB_CODENAME STREQUAL "jammy")
+  SET (DEB_ZLIB_OPTION "bundled")
+ELSE()
+  SET (DEB_ZLIB_OPTION "system")
+ENDIF()
 
 IF (WITH_NDB)
   SET (DEB_BASE_PRODUCT "cluster-")
@@ -113,6 +121,7 @@ usr/lib/mysql/plugin/component_keyring_oci.so
 usr/lib/mysql/plugin/component_enterprise_encryption.so
 usr/lib/mysql/plugin/component_masking.so
 usr/lib/mysql/plugin/component_masking_functions.so
+usr/lib/mysql/plugin/component_scheduler.so
 ")
 
    SET (DEB_INSTALL_TEST_PLUGINS

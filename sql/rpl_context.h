@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,10 +28,13 @@
 #include <memory>
 
 #include "libbinlogevents/include/compression/compressor.h"  // binary_log::transaction::compression::Compressor
+#include "libbinlogevents/include/nodiscard.h"
 #include "my_inttypes.h"  // IWYU pragma: keep
 
+#include "libbinlogevents/include/compression/factory.h"
 #include "sql/binlog/group_commit/bgc_ticket.h"
 #include "sql/memory/aligned_atomic.h"
+#include "sql/resource_blocker.h"  // resource_blocker::User
 #include "sql/system_variables.h"
 
 #include <functional>
@@ -266,17 +270,29 @@ class Last_used_gtid_tracker_ctx {
 };
 
 class Transaction_compression_ctx {
+  using Compressor_t = binary_log::transaction::compression::Compressor;
+  using Grow_calculator_t = mysqlns::buffer::Grow_calculator;
+  using Factory_t = binary_log::transaction::compression::Factory;
+
  public:
-  static const size_t DEFAULT_COMPRESSION_BUFFER_SIZE;
+  using Compressor_ptr_t = std::shared_ptr<Compressor_t>;
+  using Managed_buffer_sequence_t = Compressor_t::Managed_buffer_sequence_t;
 
-  Transaction_compression_ctx();
-  virtual ~Transaction_compression_ctx();
+  explicit Transaction_compression_ctx(PSI_memory_key key);
 
-  binary_log::transaction::compression::Compressor *get_compressor(
-      THD *session);
+  /// Return the compressor.
+  ///
+  /// This constructs the compressor on the first invocation and
+  /// returns the same compressor on subsequent invocations.
+  Compressor_ptr_t get_compressor(THD *session);
 
- protected:
-  binary_log::transaction::compression::Compressor *m_compressor{nullptr};
+  /// Return reference to the buffer sequence holding compressed
+  /// bytes.
+  Managed_buffer_sequence_t &managed_buffer_sequence();
+
+ private:
+  Managed_buffer_sequence_t m_managed_buffer_sequence;
+  Compressor_ptr_t m_compressor;
 };
 
 /**
@@ -303,6 +319,11 @@ class Binlog_group_commit_ctx {
     @param ticket The ticket to set the THD session to.
    */
   void set_session_ticket(binlog::BgcTicket ticket);
+#ifndef NDEBUG
+  /// @brief Pushes new bgc ticket, for testing purposes
+  void push_new_ticket();
+#endif
+
   /**
     Assigns the THD session to the ticket accepting assignments in the
     ticket manager. The method is idem-potent within the execution of a
@@ -365,6 +386,31 @@ class Binlog_group_commit_ctx {
   binlog::BgcTicket m_session_ticket{0};
   /** Whether or not the session already waited on the ticket. */
   bool m_has_waited{false};
+
+ public:
+  /// Set whether binlog max size was exceeded.
+  /// The max size exceeded condition must be checked with LOCK_log held and
+  /// thus its done early during flush stage although not used until end of BGC.
+  /// This is an optimization which avoids taking LOCK_log at end of BGC when no
+  /// session has seen that the threshold has been exceeded.
+  void set_max_size_exceeded(bool value) { m_max_size_exceeded = value; }
+
+  /// Turn on forced rotate at end of BGC. Thus performing a rotate although
+  /// the max size has not been reached.
+  void set_force_rotate() { m_force_rotate = true; }
+
+  /// Aggregate the rotate requests over all sessions in queue
+  ///
+  /// @return The first element states whether any session
+  /// detected max binlog size exceeded and the second whether any session
+  /// requested forced binlog rotate.
+  static std::pair<bool, bool> aggregate_rotate_settings(THD *queue);
+
+ private:
+  /// Whether session detected that binlog max size was exceeded.
+  bool m_max_size_exceeded{false};
+  /// Whether session requests forced rotate
+  bool m_force_rotate{false};
 };
 
 /*
@@ -395,6 +441,8 @@ class Rpl_thd_context {
     TX_RPL_STAGE_END  // Not used
   };
 
+  resource_blocker::User dump_thread_user;
+
  private:
   Session_consistency_gtids_ctx m_session_gtids_ctx;
   Dependency_tracker_ctx m_dependency_tracker_ctx;
@@ -410,7 +458,10 @@ class Rpl_thd_context {
   Rpl_thd_context &operator=(const Rpl_thd_context &rsc);
 
  public:
-  Rpl_thd_context() : rpl_channel_type(NO_CHANNEL_INFO) {}
+  Rpl_thd_context()
+      : m_transaction_compression_ctx(
+            0),  // todo: specify proper key instead of 0
+        rpl_channel_type(NO_CHANNEL_INFO) {}
 
   /**
     Initializers. Clears the writeset session history and re-set delegate state

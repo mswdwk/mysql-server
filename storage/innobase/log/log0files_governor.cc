@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+Copyright (c) 2019, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -1940,8 +1941,11 @@ static void log_files_truncate(log_t &log) {
   log_files_write_allowed_validate(log);
   ut_a(log_files_is_truncate_allowed(log));
 
+  /* We add one to prevent truncating the file to exactly the current write
+  position as we want to use log_files_update_current_file_low() which in
+  case lsn is at boundary between two files, tries to open the next */
   const os_offset_t end_offset = ut_uint64_align_up(
-      log.m_current_file.offset(log.write_lsn.load()), UNIV_PAGE_SIZE);
+      log.m_current_file.offset(log.write_lsn.load() + 1), UNIV_PAGE_SIZE);
 
   const os_offset_t new_size =
       std::max(end_offset, log.m_capacity.next_file_size());

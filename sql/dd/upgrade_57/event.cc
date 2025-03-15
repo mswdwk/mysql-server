@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -501,8 +502,9 @@ static bool migrate_event_to_dd(THD *thd, TABLE *event_table) {
 
   dd::upgrade::Routine_event_context_guard event_ctx_guard(thd);
 
-  thd->variables.sql_mode = (sql_mode_t)(
-      event_table->field[ET_FIELD_SQL_MODE]->val_int() & MODE_ALLOWED_MASK);
+  thd->variables.sql_mode =
+      (sql_mode_t)(event_table->field[ET_FIELD_SQL_MODE]->val_int() &
+                   MODE_ALLOWED_MASK);
 
   // Holders for user name and host name used in parse user.
   char definer_user_name_holder[USERNAME_LENGTH + 1];

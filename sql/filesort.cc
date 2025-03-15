@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -581,10 +582,9 @@ bool filesort(THD *thd, Filesort *filesort, RowIterator *source_iterator,
     else
       sort_mode.append("fixed_sort_key");
     sort_mode.append(", ");
-    sort_mode.append(param->using_packed_addons()
-                         ? "packed_additional_fields"
-                         : param->using_addon_fields() ? "additional_fields"
-                                                       : "rowid");
+    sort_mode.append(param->using_packed_addons()  ? "packed_additional_fields"
+                     : param->using_addon_fields() ? "additional_fields"
+                                                   : "rowid");
     sort_mode.append(">");
 
     const char *algo_text[] = {"none", "std::sort", "std::stable_sort"};
@@ -1000,9 +1000,9 @@ static ha_rows read_all_rows(
 
     ++(*found_rows);
     num_total_records++;
-    if (pq)
-      pq->push(tables);
-    else {
+    if (pq != nullptr) {
+      if (pq->push(tables)) return HA_POS_ERROR;
+    } else {
       size_t key_length;
       bool out_of_mem_or_error = alloc_and_make_sortkey(
           param, fs_info, tables, &key_length, &longest_addon_so_far);
@@ -1262,6 +1262,9 @@ size_t make_sortkey_from_item(Item *item, Item_result result_type,
       const CHARSET_INFO *cs = item->collation.collation;
 
       String *res = item->val_str(tmp_buffer);
+      if (current_thd->is_error()) {
+        return UINT_MAX;
+      }
       if (res == nullptr)  // Value is NULL.
       {
         assert(item->is_nullable());
@@ -1307,6 +1310,9 @@ size_t make_sortkey_from_item(Item *item, Item_result result_type,
     case INT_RESULT: {
       assert(!is_varlen);
       longlong value = item->int_sort_key();
+      if (current_thd->is_error()) {
+        return UINT_MAX;
+      }
 
       /*
         Note: item->null_value can't be trusted alone here; there are cases
@@ -1356,6 +1362,9 @@ size_t make_sortkey_from_item(Item *item, Item_result result_type,
     case REAL_RESULT: {
       assert(!is_varlen);
       double value = item->val_real();
+      if (current_thd->is_error()) {
+        return UINT_MAX;
+      }
       if (item->null_value) {
         assert(item->is_nullable());
         *null_indicator = 0;
@@ -2174,7 +2183,7 @@ uint sortlength(THD *thd, st_sort_field *sortorder, uint s_length) {
   return total_length;
 }
 
-bool SortWillBeOnRowId(TABLE *table) {
+bool SortWillBeOnRowId(const TABLE *table) {
   if (table->pos_in_table_list &&
       table->pos_in_table_list->is_fulltext_searched()) {
     // MATCH() (except in “boolean mode”) doesn't use the actual value,
@@ -2190,7 +2199,8 @@ bool SortWillBeOnRowId(TABLE *table) {
 
   for (Field **pfield = table->field; *pfield != nullptr; ++pfield) {
     Field *field = *pfield;
-    if (!bitmap_is_set(table->read_set, field->field_index())) continue;
+    if (!bitmap_is_set(&table->read_set_internal, field->field_index()))
+      continue;
 
     // Having large blobs in addon fields could be very inefficient,
     // but small blobs are OK (where “small” is a bit fuzzy, and relative
@@ -2264,7 +2274,7 @@ Addon_fields *Filesort::get_addon_fields(
   *plength = *ppackable_length = 0;
   *addon_fields_status = Addon_fields_status::unknown_status;
 
-  for (TABLE *table : tables) {
+  for (const TABLE *table : tables) {
     if (table->is_nullable()) {
       null_fields++;
     }
@@ -2278,7 +2288,8 @@ Addon_fields *Filesort::get_addon_fields(
     }
     for (Field **pfield = table->field; *pfield != nullptr; ++pfield) {
       Field *field = *pfield;
-      if (!bitmap_is_set(table->read_set, field->field_index())) continue;
+      if (!bitmap_is_set(&table->read_set_internal, field->field_index()))
+        continue;
 
       const uint field_length = field->max_packed_col_length();
       AddWithSaturate(field_length, &total_length);
@@ -2332,10 +2343,11 @@ Addon_fields *Filesort::get_addon_fields(
 
   m_sort_param.addon_fields->set_first_addon_relative_offset(length);
   Addon_fields_array::iterator addonf = m_sort_param.addon_fields->begin();
-  for (TABLE *table : tables) {
+  for (const TABLE *table : tables) {
     for (Field **pfield = table->field; *pfield != nullptr; ++pfield) {
       Field *field = *pfield;
-      if (!bitmap_is_set(table->read_set, field->field_index())) continue;
+      if (!bitmap_is_set(&table->read_set_internal, field->field_index()))
+        continue;
       assert(addonf != m_sort_param.addon_fields->end());
 
       addonf->field = field;

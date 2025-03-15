@@ -1,15 +1,16 @@
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -323,8 +324,7 @@ class Protocol_local final : public Protocol {
 ******************************************************************************/
 
 /**
-  Rewrite the current query (to obfuscate passwords etc.) if needed
-  (i.e. only if we'll be writing the query to any of our logs).
+  Rewrite the current query (to obfuscate passwords etc.).
 
   Side-effect: thd->rewritten_query() may be populated with a rewritten
                query.  If the query is not of a rewritable type,
@@ -332,24 +332,18 @@ class Protocol_local final : public Protocol {
 
   @param thd                thread handle
 */
-static inline void rewrite_query_if_needed(THD *thd) {
-  bool general =
-      (opt_general_log && !(opt_general_log_raw || thd->slave_thread));
-
-  if ((thd->sp_runtime_ctx == nullptr) &&
-      (general || opt_slow_log || opt_bin_log)) {
-    /*
-      thd->m_rewritten_query may already contain "PREPARE stmt FROM ..."
-      at this point, so we reset it here so mysql_rewrite_query()
-      won't complain.
-    */
-    thd->reset_rewritten_query();
-    /*
-      Now replace the "PREPARE ..." with the obfuscated version of the
-      actual query were prepare.
-    */
-    mysql_rewrite_query(thd);
-  }
+static inline void rewrite_query(THD *thd) {
+  /*
+    thd->m_rewritten_query may already contain "PREPARE stmt FROM ..."
+    at this point, so we reset it here so mysql_rewrite_query()
+    won't complain.
+  */
+  thd->reset_rewritten_query();
+  /*
+    Now replace the "PREPARE ..." with the obfuscated version of the
+    actual query were prepare.
+  */
+  mysql_rewrite_query(thd);
 }
 
 /**
@@ -774,11 +768,10 @@ bool Prepared_statement::insert_parameters(THD *thd, String *query,
       param->set_data_type_actual(MYSQL_TYPE_VARCHAR);
       // see Item_param::set_str() for explanation
       param->set_collation_actual(
-          param->collation_source() == &my_charset_bin
-              ? &my_charset_bin
-              : param->collation.collation != &my_charset_bin
-                    ? param->collation.collation
-                    : current_thd->variables.collation_connection);
+          param->collation_source() == &my_charset_bin ? &my_charset_bin
+          : param->collation.collation != &my_charset_bin
+              ? param->collation.collation
+              : current_thd->variables.collation_connection);
 
     } else if (parameters[i].null_bit) {
       param->set_null();
@@ -1011,6 +1004,7 @@ static bool send_statement(THD *thd, const Prepared_statement *stmt,
       param_list.push_back(&item);
     }
     rc |= thd->send_result_metadata(param_list, Protocol::SEND_EOF);
+    assert(CountVisibleFields(param_list) == stmt->m_param_count);
   }
   if (rc) return true; /* purecov: inspected */
 
@@ -1052,8 +1046,8 @@ static bool mysql_test_set_fields(THD *thd,
   DBUG_TRACE;
   assert(stmt->m_arena.is_stmt_prepare());
 
-  thd->lex->using_hypergraph_optimizer =
-      thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER);
+  thd->lex->set_using_hypergraph_optimizer(
+      thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER));
 
   if (tables &&
       check_table_access(thd, SELECT_ACL, tables, false, UINT_MAX, false))
@@ -1129,6 +1123,10 @@ bool Sql_cmd_create_table::prepare(THD *thd) {
       return true;
 
     query_block->context.resolve_in_select_list = true;
+
+    // Use the hypergraph optimizer for the SELECT statement, if enabled.
+    lex->set_using_hypergraph_optimizer(
+        thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER));
 
     Prepared_stmt_arena_holder ps_arena_holder(thd);
 
@@ -2267,11 +2265,11 @@ bool Execute_sql_statement::execute_server_code(THD *thd) {
   thd->m_statement_psi = nullptr;
 
   /*
-    Rewrite first (if needed); execution might replace passwords
+    Rewrite first, execution might replace passwords
     with hashes in situ without flagging it, and then we'd make
     a hash of that hash.
   */
-  rewrite_query_if_needed(thd);
+  rewrite_query(thd);
   log_execute_line(thd);
 
   error = mysql_execute_command(thd);
@@ -2629,17 +2627,22 @@ bool Prepared_statement::prepare(THD *thd, const char *query_str,
 
   lex_end(m_lex);
 
-  rewrite_query_if_needed(thd);
+  rewrite_query(thd);
+
+  const char *display_query_string;
+  int display_query_length;
 
   if (thd->rewritten_query().length()) {
-    thd->set_query_for_display(thd->rewritten_query().ptr(),
-                               thd->rewritten_query().length());
-    MYSQL_SET_PS_TEXT(m_prepared_stmt, thd->rewritten_query().ptr(),
-                      thd->rewritten_query().length());
+    display_query_string = thd->rewritten_query().ptr();
+    display_query_length = thd->rewritten_query().length();
   } else {
-    thd->set_query_for_display(thd->query().str, thd->query().length);
-    MYSQL_SET_PS_TEXT(m_prepared_stmt, thd->query().str, thd->query().length);
+    display_query_string = thd->query().str;
+    display_query_length = thd->query().length;
   }
+
+  thd->set_query_for_display(display_query_string, display_query_length);
+  MYSQL_SET_PS_TEXT(m_prepared_stmt, display_query_string,
+                    display_query_length);
 
   cleanup_stmt(thd);
   stmt_backup.restore_thd(thd, this);
@@ -3018,6 +3021,13 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
     if (reprepare(thd)) return true;
   }
 
+  // Some SQL commands need re-preparation, such as Sql_cmd_create_table
+  // when the keys involve an expression.
+  if (!m_first_execution && m_lex->m_sql_cmd &&
+      m_lex->m_sql_cmd->reprepare_on_execute_required()) {
+    if (reprepare(thd)) return true;
+  }
+
 reexecute:
   /*
     If the item_list is not empty, we'll wrongly free some externally
@@ -3108,6 +3118,10 @@ reexecute:
           thd->secondary_engine_optimization() ==
               Secondary_engine_optimization::SECONDARY &&
           !m_lex->unit->is_executed()) {
+        if (m_lex->has_external_tables()) {
+          set_external_engine_fail_reason(m_lex,
+                                          thd->get_stmt_da()->message_text());
+        }
         thd->clear_error();
         thd->set_secondary_engine_optimization(
             Secondary_engine_optimization::PRIMARY_ONLY);
@@ -3125,6 +3139,7 @@ reexecute:
       goto reexecute;
   }
   reset_stmt_parameters(this);
+  m_first_execution = false;
 
   // Re-enable the general log if it was temporarily disabled while repreparing
   // and executing a statement for a secondary engine.
@@ -3261,7 +3276,7 @@ bool Prepared_statement::reprepare(THD *thd) {
   */
   thd->get_stmt_da()->reset_condition_info(thd);
 
-  copy_guard.commit();
+  copy_guard.release();
 
   return false;
 }
@@ -3626,12 +3641,25 @@ bool Prepared_statement::execute(THD *thd, String *expanded_query,
     - Any passwords in the "Execute" line should be substituted with
       their hashes, or a notice.
 
-    Rewrite first (if needed); execution might replace passwords
+    Rewrite first, execution might replace passwords
     with hashes in situ without flagging it, and then we'd make
     a hash of that hash.
   */
-  rewrite_query_if_needed(thd);
+  rewrite_query(thd);
   log_execute_line(thd);
+
+  const char *display_query_string;
+  int display_query_length;
+
+  if (thd->rewritten_query().length()) {
+    display_query_string = thd->rewritten_query().ptr();
+    display_query_length = thd->rewritten_query().length();
+  } else {
+    display_query_string = thd->query().str;
+    display_query_length = thd->query().length;
+  }
+
+  mysql_thread_set_info(display_query_string, display_query_length);
 
   thd->binlog_need_explicit_defaults_ts =
       m_lex->binlog_need_explicit_defaults_ts;

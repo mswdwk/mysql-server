@@ -1313,9 +1313,11 @@ eval PREPARE stmt FROM "EXPLAIN FORMAT=tree $query";
 eval EXECUTE stmt USING @a, @b;
 SET @a = 2;
 SET @b = '2023-05-06 16:49:45';
+SET timestamp=UNIX_TIMESTAMP('2023-05-06 16:49:45');
 --replace_regex $elide_costs
 --skip_if_hypergraph  # Depends on the query plan.
 eval EXECUTE stmt USING @a, @b;
+SET timestamp=default;
 
 DROP TABLE t1;
 
@@ -1419,3 +1421,200 @@ INSERT INTO t1 VALUES('å');
 SELECT * FROM (SELECT f1 FROM t1 UNION SELECT f1 FROM t1) AS dt WHERE f1 = 'å';
 
 DROP TABLE t1;
+
+--echo #
+--echo # Bug#35689804: Depending on the data inserted, the results of
+--echo #               the PREPARE and the general query run are different.
+--echo #
+
+CREATE TABLE t1 (f1 INTEGER, f2 VARCHAR(30) COLLATE utf8mb4_bin NOT NULL);
+INSERT INTO t1(f2) VALUES ('680519363848');
+
+# Query from the bug report
+let query =
+SELECT *
+FROM (SELECT IF(f2 = ?, ?, CASE WHEN f2 IS NULL THEN ? ELSE ? END) AS case_f
+      FROM t1
+      UNION ALL
+      SELECT IF(f2 = ?, ?, CASE WHEN f2 IS NULL THEN ? ELSE ? END) AS case_f
+      FROM t1) AS dt1
+WHERE case_f = ?;
+
+SET @a1 = 'Y';
+SET @a2 = 'Y';
+SET @a3 = 'N';
+SET @a4 = 'Y';
+SET @a5 = 'Y';
+SET @a6 = 'Y';
+SET @a7 = 'N';
+SET @a8 = 'Y';
+SET @a9 = 'Y';
+
+eval PREPARE stmt FROM "$query";
+eval EXECUTE stmt USING @a1, @a2, @a3, @a4, @a5, @a6, @a7, @a8, @a9;
+eval PREPARE stmt FROM "EXPLAIN FORMAT=tree $query";
+--replace_regex $elide_costs
+--skip_if_hypergraph  # Depends on the query plan.
+eval EXECUTE stmt USING @a1, @a2, @a3, @a4, @a5, @a6, @a7, @a8, @a9;
+
+# Simplified query
+SET optimizer_switch="derived_merge=off";
+let query =
+SELECT * FROM (SELECT ? AS case_f FROM t1) as dt1 WHERE case_f = 'Y';
+SET @a1 = 'Y';
+eval PREPARE stmt FROM "$query";
+eval EXECUTE stmt USING @a1;
+eval PREPARE stmt FROM "EXPLAIN FORMAT=tree $query";
+--replace_regex $elide_costs
+--skip_if_hypergraph  # Depends on the query plan.
+eval EXECUTE stmt USING @a1;
+
+SET optimizer_switch=default;
+
+DROP TABLE t1;
+
+--echo # Bug#35211828: Derived condition pushdown with rollup gives wrong
+--echo #               results
+--echo #
+
+CREATE TABLE t1 (f1 INTEGER, f2 INTEGER);
+INSERT INTO t1 VALUES(1,2);
+INSERT INTO t1 VALUES (2,2);
+
+SELECT f1, f2 FROM (SELECT f1, f2 FROM t1 GROUP BY f1, f2 WITH ROLLUP) as dt
+WHERE f2 IS NULL;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#36246859: Collation issue: ERROR 1253 (42000):
+--echo #               COLLATION '' is not valid for CHARACTER SET
+--echo #
+
+CREATE TABLE t1 (f1 char(10)
+CHARACTER SET latin1 COLLATE latin1_spanish_ci DEFAULT NULL)
+DEFAULT CHARSET=latin1 COLLATE=latin1_spanish_ci;
+INSERT INTO t1 VALUES ('C');
+INSERT INTO t1 VALUES ('D');
+
+# Set charset to latin for creating the view.
+SET character_set_client = latin1;
+SET character_set_connection = latin1;
+CREATE VIEW v1 AS
+SELECT 'A' COLLATE latin1_spanish_ci AS field1 FROM t1
+UNION
+SELECT 'B' COLLATE latin1_spanish_ci AS field1 FROM t1 AS t2;
+
+# Use a different charset now to query the view.
+SET character_set_connection = default;
+# Condition pushdown to view "v1" should happen
+# without any errors as it now uses the view's
+# connection context when "field1" is replaced
+# with "'A' COLLATE latin1_spanish_ci".
+let $query = SELECT * FROM v1 WHERE field1 IN ('C');
+--replace_regex $elide_costs
+--skip_if_hypergraph  # Depends on the query plan.
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+let $query = SELECT * FROM (SELECT * FROM v1 UNION SELECT * FROM v1) as dt
+            WHERE field1 IN ('A');
+--replace_regex $elide_costs
+--skip_if_hypergraph  # Depends on the query plan.
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+# view context of "v1" is not used when cloning the condition
+# "field1 IN ('C') OR COALESCE('A' COLLATE utf8mb4_spanish_ci IN ('B'), field1)"
+# to be pushed down in case of SET operations. It is used only when
+# "field1" is replaced with "'A' COLLATE latin1_spanish_ci".
+let $query = SELECT * FROM v1
+             WHERE field1 IN ('C') OR
+                   COALESCE('A' COLLATE utf8mb4_spanish_ci IN ('B'), field1);
+--replace_regex $elide_costs
+--skip_if_hypergraph  # Depends on the query plan.
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+DROP VIEW v1;
+
+#Simplified repro
+# Set charset to latin for creating the view.
+SET character_set_client = latin1;
+SET character_set_connection = latin1;
+CREATE VIEW v1 AS SELECT 'A' COLLATE latin1_spanish_ci AS field1 FROM t1;
+
+# Use a different charset now to query the view.
+SET character_set_connection = default;
+# We do not want the view to be merged. So set "derived_merge" should be off.
+SET optimizer_switch="derived_merge=off";
+let $query = SELECT * FROM v1 WHERE field1 IN ('C');
+--replace_regex $elide_costs
+--skip_if_hypergraph  # Depends on the query plan.
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+
+SET optimizer_switch=default;
+SET character_set_client = default;
+
+DROP VIEW v1;
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#37111452: Error selecting from a view where the view and
+--echo #               the connection charset differs
+--echo #
+
+CREATE TABLE t1 (c1 CHAR(10)) DEFAULT CHARSET=latin1 COLLATE=latin1_spanish_ci;
+CREATE TABLE t2 (c1 char(10)) DEFAULT CHARSET=latin1 COLLATE=latin1_spanish_ci;
+
+INSERT INTO t1 VALUES (1);
+INSERT INTO t2 VALUES (1);
+
+SET @create_view_utf8 =
+"CREATE VIEW v1 AS
+ SELECT '0000000001þ' COLLATE latin1_spanish_ci AS tipos FROM t1
+ UNION
+ SELECT '0000000001þ' COLLATE latin1_spanish_ci AS tipos from t2";
+
+SELECT CAST(@create_view_utf8 AS CHAR CHARACTER SET latin1)
+INTO @create_view_latin1;
+
+SET @select_utf8 = "SELECT * FROM v1 WHERE tipos IN ('0000000001þ')";
+
+SELECT CAST(@select_utf8 AS CHAR CHARACTER SET latin1) INTO @select_latin1;
+
+SET character_set_client = latin1;
+SET character_set_connection = latin1;
+
+prepare ps FROM @create_view_latin1;
+execute ps;
+
+prepare ps_select_latin1_on FROM @select_latin1;
+execute ps_select_latin1_on;
+
+SET optimizer_switch="derived_condition_pushdown=off";
+
+prepare ps_select_latin1_off FROM @select_latin1;
+execute ps_select_latin1_off;
+
+SET character_set_client = DEFAULT;
+SET character_set_connection = DEFAULT;
+
+SET optimizer_switch="derived_condition_pushdown=on";
+
+prepare ps_select_utf8_on FROM @select_utf8;
+execute ps_select_utf8_on;
+
+SET optimizer_switch="derived_condition_pushdown=off";
+
+prepare ps_select_utf8_off FROM @select_utf8;
+execute ps_select_utf8_off;
+
+SET optimizer_switch="derived_condition_pushdown=on";
+
+DEALLOCATE PREPARE ps;
+DEALLOCATE PREPARE ps_select_utf8_on;
+DEALLOCATE PREPARE ps_select_utf8_off;
+DEALLOCATE PREPARE ps_select_latin1_on;
+DEALLOCATE PREPARE ps_select_latin1_off;
+
+DROP VIEW v1;
+DROP TABLE t1, t2;

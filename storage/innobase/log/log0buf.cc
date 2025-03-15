@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -505,7 +506,7 @@ static inline void log_buffer_s_lock_wait(log_t &log, const sn_t start_sn) {
   if (log.sn_locked.load(std::memory_order_acquire) <= start_sn) {
     do {
       if (srv_spin_wait_delay) {
-        ut_delay(ut::random_from_interval(0, srv_spin_wait_delay));
+        ut_delay(ut::random_from_interval_fast(0, srv_spin_wait_delay));
       }
       if (i < srv_n_spin_wait_rounds) {
         i++;
@@ -625,7 +626,7 @@ void log_buffer_x_lock_enter(log_t &log) {
     /* must wait for closed_lsn == current_lsn */
     while (i < srv_n_spin_wait_rounds && closed_lsn < current_lsn) {
       if (srv_spin_wait_delay) {
-        ut_delay(ut::random_from_interval(0, srv_spin_wait_delay));
+        ut_delay(ut::random_from_interval_fast(0, srv_spin_wait_delay));
       }
       i++;
       closed_lsn = log_buffer_dirty_pages_added_up_to_lsn(log);
@@ -1198,10 +1199,6 @@ void log_buffer_flush_to_disk(log_t &log, bool sync) {
   /* Google's patch introduced log_buffer_sync_in_background which was calling
   log_write_up_to, and this is the left-over from that. */
   log_write_up_to(log, lsn, sync);
-}
-
-void log_buffer_flush_to_disk(bool sync) {
-  log_buffer_flush_to_disk(*log_sys, sync);
 }
 
 void log_buffer_sync_in_background() {

@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +32,7 @@
 #include <utility>
 
 #include "lex_string.h"
+#include "libbinlogevents/include/binlog_event.h"  // binary_log::max_log_event_size
 #include "m_string.h"
 #include "map_helpers.h"
 #include "my_byteorder.h"
@@ -51,7 +53,6 @@
 #include "sql/derror.h"      // ER_THD
 #include "sql/item_func.h"   // user_var_entry
 #include "sql/log.h"
-#include "sql/log_event.h"  // MAX_MAX_ALLOWED_PACKET
 #include "sql/mdl.h"
 #include "sql/mysqld.h"  // global_system_variables ...
 #include "sql/protocol.h"
@@ -344,7 +345,7 @@ void Binlog_sender::init() {
   m_wait_new_events =
       !((thd->server_id == 0) || ((m_flag & BINLOG_DUMP_NON_BLOCK) != 0));
   /* Binary event can be vary large. So set it to max allowed packet. */
-  thd->variables.max_allowed_packet = MAX_MAX_ALLOWED_PACKET;
+  thd->variables.max_allowed_packet = binary_log::max_log_event_size;
 
 #ifndef NDEBUG
   if (opt_sporadic_binlog_dump_fail && (binlog_dump_count++ % 2))
@@ -1108,7 +1109,7 @@ int Binlog_sender::send_format_description_event(File_reader &reader,
 
   Log_event *ev = nullptr;
   Binlog_read_error binlog_read_error = binlog_event_deserialize(
-      event_ptr, event_len, reader.format_description_event(), false, &ev);
+      event_ptr, event_len, &reader.format_description_event(), false, &ev);
   if (binlog_read_error.has_error()) {
     set_fatal_error(binlog_read_error.get_str());
     return 1;

@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,6 +30,7 @@
 #include <mysql/components/my_service.h>
 #include <mysql/components/services/component_sys_var_service.h>
 #include <mysql/components/services/group_replication_status_service.h>
+#include "libbinlogevents/include/binlog_event.h"  // binary_log::max_log_event_size
 #include "m_string.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
@@ -42,7 +44,6 @@
 #include "mysqld_error.h"       // ER_*
 #include "sql/clone_handler.h"  // is_data_dropped
 #include "sql/log.h"
-#include "sql/log_event.h"           // MAX_MAX_ALLOWED_PACKET
 #include "sql/mysqld.h"              // mysqld_port
 #include "sql/mysqld_thd_manager.h"  // Global_THD_manager
 #include "sql/replication.h"         // Trans_context_info
@@ -591,7 +592,7 @@ unsigned long get_replica_max_allowed_packet() {
 }
 
 unsigned long get_max_replica_max_allowed_packet() {
-  return MAX_MAX_ALLOWED_PACKET;
+  return binary_log::max_log_event_size;
 }
 
 bool is_server_restarting_after_clone() { return clone_startup; }

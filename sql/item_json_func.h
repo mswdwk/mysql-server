@@ -1,18 +1,19 @@
 #ifndef ITEM_JSON_FUNC_INCLUDED
 #define ITEM_JSON_FUNC_INCLUDED
 
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -175,7 +176,7 @@ class Item_json_func : public Item_func {
     @param parent_args  arguments to forward to Item_func's constructor
   */
   template <typename... Args>
-  Item_json_func(THD *thd, Args &&... parent_args)
+  Item_json_func(THD *thd, Args &&...parent_args)
       : Item_func(std::forward<Args>(parent_args)...),
         m_path_cache(thd, arg_count) {
     set_data_type_json();
@@ -593,7 +594,7 @@ class Item_func_json_extract final : public Item_json_func {
 class Item_func_modify_json_in_path : public Item_json_func {
  protected:
   template <typename... Args>
-  explicit Item_func_modify_json_in_path(Args &&... parent_args)
+  explicit Item_func_modify_json_in_path(Args &&...parent_args)
       : Item_json_func(std::forward<Args>(parent_args)...) {
     // The function does not necessarily return NULL when an argument is NULL.
     // It returns NULL only if the first argument is NULL, or if one of the JSON
@@ -664,7 +665,7 @@ class Item_func_json_set_replace : public Item_func_modify_json_in_path {
 
  protected:
   template <typename... Args>
-  explicit Item_func_json_set_replace(bool json_set, Args &&... parent_args)
+  explicit Item_func_json_set_replace(bool json_set, Args &&...parent_args)
       : Item_func_modify_json_in_path(std::forward<Args>(parent_args)...),
         m_json_set(json_set),
         m_path(key_memory_JSON) {}
@@ -679,7 +680,7 @@ class Item_func_json_set_replace : public Item_func_modify_json_in_path {
 class Item_func_json_set final : public Item_func_json_set_replace {
  public:
   template <typename... Args>
-  explicit Item_func_json_set(Args &&... parent_args)
+  explicit Item_func_json_set(Args &&...parent_args)
       : Item_func_json_set_replace(true, std::forward<Args>(parent_args)...) {}
 
   const char *func_name() const override { return "json_set"; }
@@ -691,7 +692,7 @@ class Item_func_json_set final : public Item_func_json_set_replace {
 class Item_func_json_replace final : public Item_func_json_set_replace {
  public:
   template <typename... Args>
-  explicit Item_func_json_replace(Args &&... parent_args)
+  explicit Item_func_json_replace(Args &&...parent_args)
       : Item_func_json_set_replace(false, std::forward<Args>(parent_args)...) {}
 
   const char *func_name() const override { return "json_replace"; }
@@ -703,7 +704,7 @@ class Item_func_json_replace final : public Item_func_json_set_replace {
 class Item_func_json_array final : public Item_json_func {
  public:
   template <typename... Args>
-  explicit Item_func_json_array(Args &&... parent_args)
+  explicit Item_func_json_array(Args &&...parent_args)
       : Item_json_func(std::forward<Args>(parent_args)...) {
     // Does not return NULL on NULL input. A NULL argument is interpreted as the
     // JSON null literal.
@@ -765,7 +766,7 @@ class Item_func_json_search : public Item_json_func {
     @param parent_args arguments to pass to Item_json_func's constructor
   */
   template <typename... Args>
-  Item_func_json_search(Args &&... parent_args)
+  Item_func_json_search(Args &&...parent_args)
       : Item_json_func(std::forward<Args>(parent_args)...),
         m_cached_ooa(ooa_uninitialized) {}
 
@@ -797,7 +798,7 @@ class Item_func_json_remove : public Item_json_func {
 
  public:
   template <typename... Args>
-  Item_func_json_remove(Args &&... parent_args)
+  Item_func_json_remove(Args &&...parent_args)
       : Item_json_func(std::forward<Args>(parent_args)...) {}
 
   const char *func_name() const override { return "json_remove"; }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -292,8 +293,9 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
   if (share->keys) {
     KEY *keyinfo;
     KEY_PART_INFO *key_part;
-    uint primary_key = (uint)(
-        find_type(primary_key_name, &share->keynames, FIND_TYPE_NO_PREFIX) - 1);
+    uint primary_key = (uint)(find_type(primary_key_name, &share->keynames,
+                                        FIND_TYPE_NO_PREFIX) -
+                              1);
     longlong ha_option = handler_file->ha_table_flags();
     keyinfo = share->key_info;
     key_part = keyinfo->key_part;
@@ -733,6 +735,10 @@ static bool fill_share_from_dd(THD *thd, TABLE_SHARE *share,
   if (table_options.exists("encrypt_type"))
     table_options.get("encrypt_type", &share->encrypt_type, &share->mem_root);
 
+  // Read secondary load option.
+  if (table_options.exists("secondary_load"))
+    table_options.get("secondary_load", &share->secondary_load);
+
   return false;
 }
 
@@ -1137,19 +1143,20 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
                               rec_pos, field_nr))
         return true;
 
+      /*
+        Account for NULL bits if it's a regular column.
+        If it's a generated column, we do it below so the NULL
+        bits end up in the expected order.
+      */
+      if ((null_bit_pos += column_preamble_bits(col_obj)) > 7) {
+        null_pos++;
+        null_bit_pos -= 8;
+      }
+
       rec_pos += share->field[field_nr]->pack_length_in_rec();
     } else
       has_vgc = true;
 
-    /*
-      Virtual generated columns still need to be accounted in null bits and
-      field_nr calculations, since they reside at the normal place in record
-      preamble and TABLE_SHARE::field array.
-    */
-    if ((null_bit_pos += column_preamble_bits(col_obj)) > 7) {
-      null_pos++;
-      null_bit_pos -= 8;
-    }
     field_nr++;
   }
 
@@ -1162,8 +1169,6 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
         static_cast<ulong>(rec_pos - share->default_values))
       share->stored_rec_length = (rec_pos - share->default_values);
 
-    null_pos = share->default_values;
-    null_bit_pos = (share->db_create_options & HA_OPTION_PACK_RECORD) ? 0 : 1;
     field_nr = 0;
 
     for (const dd::Column *col_obj2 : tab_obj->columns()) {
@@ -1176,17 +1181,18 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
                                 rec_pos, field_nr))
           return true;
 
+        /*
+          Account for generated columns -- we do this separately here
+          so the NULL bits end up in the expected order.
+        */
+        if ((null_bit_pos += column_preamble_bits(col_obj2)) > 7) {
+          null_pos++;
+          null_bit_pos -= 8;
+        }
+
         rec_pos += share->field[field_nr]->pack_length_in_rec();
       }
 
-      /*
-        Account for all columns while evaluating null_pos/null_bit_pos and
-        field_nr.
-      */
-      if ((null_bit_pos += column_preamble_bits(col_obj2)) > 7) {
-        null_pos++;
-        null_bit_pos -= 8;
-      }
       field_nr++;
     }
   }

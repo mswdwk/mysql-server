@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -25,7 +26,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 *****************************************************************************/
 
 /** @file include/ddl0impl-buffer.h
- DDL buffer infrastrucure.
+ DDL buffer infrastructure.
  Created 2020-11-01 by Sunny Bains. */
 
 #ifndef ddl0impl_buffer_h
@@ -35,100 +36,12 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "dict0dict.h"
 
 namespace ddl {
-
-/** For DDL memory allocations that use the mem_key_ddl handle. */
-struct PFS_buffer : private ut::Non_copyable {
-  using Type = byte;
-  using Allocator = ut::allocator<Type>;
-
-  /** Constructor. */
-  PFS_buffer() = default;
-
-  /** Destructor. */
-  ~PFS_buffer() noexcept { deallocate(); }
-
-  /** @return allocated and initialized memory or nullptr on failure.
-  @param[in] size               Number of bytes to allocate. */
-  byte *allocate(size_t size) noexcept {
-    ut_a(m_size == 0);
-    ut_a(m_ptr == nullptr);
-
-    m_ptr = static_cast<byte *>(
-        ut::malloc_large_page_withkey(ut::make_psi_memory_key(mem_key_ddl),
-                                      size, ut::fallback_to_normal_page_t{}));
-
-    if (m_ptr != nullptr) {
-      m_size = size;
-      memset(m_ptr, 0x0, m_size);
-    }
-
-    return m_ptr;
-  }
-
-  /** Deallocate the memory. */
-  void deallocate() noexcept {
-    ut::free_large_page(m_ptr, ut::fallback_to_normal_page_t{});
-    m_ptr = nullptr;
-  }
-
-  /** Pointer to allocated buffer. */
-  byte *m_ptr{};
-
-  /** Number of bytes allocated. */
-  size_t m_size{};
-};
-
-/** Buffer used for reading and writing to the temporary files. */
-struct Aligned_buffer : private ut::Non_copyable {
-  /** Constructor. */
-  Aligned_buffer() = default;
-
-  /** Destructor. */
-  ~Aligned_buffer() = default;
-
-  /** Allocate the buffer.
-  @param[in] size               Size of the buffer.
-  @return true on success. */
-  bool allocate(size_t size) noexcept {
-    ut_a(m_io_buffer.second == 0);
-    ut_a(m_io_buffer.first == nullptr);
-
-    /* Extra space to align memory for O_DIRECT. */
-    auto ptr = m_buffer.allocate(size + UNIV_SECTOR_SIZE);
-
-    if (ptr == nullptr) {
-      return false;
-    }
-
-    m_io_buffer.second = size;
-    m_io_buffer.first = static_cast<byte *>(ut_align(ptr, UNIV_SECTOR_SIZE));
-
-    return true;
-  }
-
-  /** Get the IO buffer.
-  @return the io buffer suitably aligned. */
-  IO_buffer io_buffer() noexcept { return m_io_buffer; }
-
- private:
-  /** Raw buffer (unaligned pointer). */
-  PFS_buffer m_buffer{};
-
-  /** The IO buffer. */
-  IO_buffer m_io_buffer{};
-};
-
 /** Buffer for sorting in main memory. */
 struct Key_sort_buffer : private ut::Non_copyable {
   /** Callback for writing serialized data to to disk.
-  @param[in] io_buffer          Buffer to persist.
-  @param[in,out] n              Number of bytes written is returned.
-                                Input value semantics:
-                                0  - Write up to aligned length.
-                                >0 - All data will be written and
-                                     last block will be padded with zeros.
+  @param[in] io_buffer          Buffer to persist - aligned to IO_BLOCK_SIZE.
   @return DB_SUCCES or error code. */
-  using Function = std::function<dberr_t(IO_buffer io_buffer, os_offset_t &n)>;
+  using Function = std::function<dberr_t(IO_buffer io_buffer)>;
 
   /** Constructor.
   @param[in,out] index          Sort buffer is for this index.
@@ -144,9 +57,9 @@ struct Key_sort_buffer : private ut::Non_copyable {
 
   /** Serialize the contents for storing to disk.
   @param[in] io_buffer          Buffer for serializing.
-  @param[in] f                  Function for persisting the data.
+  @param[in] persist            Function for persisting the data.
   @return DB_SUCCESS or error code. */
-  dberr_t serialize(IO_buffer io_buffer, Function &&f) noexcept;
+  dberr_t serialize(IO_buffer io_buffer, Function persist) noexcept;
 
   /** Reset the sort buffer. clear the heap and entries. */
   void clear() noexcept;
@@ -198,8 +111,8 @@ struct Key_sort_buffer : private ut::Non_copyable {
   bool will_fit(size_t n) const noexcept {
     /* Reserve one byte for the end marker and adjust for meta-data overhead. */
     return m_total_size + n +
-               (sizeof(std::remove_pointer<decltype(
-                           m_dtuples)::value_type>::type) *
+               (sizeof(std::remove_pointer<
+                       decltype(m_dtuples)::value_type>::type) *
                 (m_n_tuples + 1)) <=
            m_buffer_size - 1;
   }

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -13,12 +13,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -2651,6 +2652,9 @@ void buf_pool_clear_hash_index(void) {
 
   DEBUG_SYNC_C("purge_wait_for_btr_search_latch");
 
+  bool pause_before_processing = DBUG_EVALUATE_IF(
+      "buf_pool_clear_hash_index_check_other_blocks", true, false);
+
   for (ulong p = 0; p < srv_buf_pool_instances; p++) {
     buf_pool_t *const buf_pool = buf_pool_from_array(p);
     buf_chunk_t *const chunks = buf_pool->chunks;
@@ -2670,6 +2674,13 @@ void buf_pool_clear_hash_index(void) {
           /* The block is already not in AHI, and it can't be added before the
           AHI is re-enabled, so there's nothing to be done here. */
           continue;
+        }
+
+        /* Identify target block and sync with test */
+        if (pause_before_processing && block->page.old &&
+            !block->page.is_dirty()) {
+          DEBUG_SYNC_C("buf_pool_clear_hash_index_will_process_block");
+          pause_before_processing = false;
         }
 
         /* This latch will prevent block state transitions. It is important for
@@ -2705,6 +2716,8 @@ void buf_pool_clear_hash_index(void) {
             /* No other state should have AHI */
             ut_ad(block->ahi.index == nullptr);
             ut_ad(block->ahi.n_pointers == 0);
+            /* Go to next block as AHI is already nullptr */
+            continue;
         }
 
 #if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
@@ -2716,6 +2729,13 @@ void buf_pool_clear_hash_index(void) {
         btr_search_set_block_not_cached(block);
       }
     }
+  }
+
+  /* Main intent was to identify target block. Due to rare race conditions, such
+  block is not found. To prevent timeout, unblock in case target block is not
+  found */
+  if (pause_before_processing) {
+    DEBUG_SYNC_C("buf_pool_clear_hash_index_will_process_block");
   }
 }
 
@@ -4018,30 +4038,12 @@ dberr_t Buf_fetch<T>::check_state(buf_block_t *&block) {
 
 template <typename T>
 void Buf_fetch<T>::read_page() {
-  bool success{};
-  auto sync = m_mode != Page_fetch::SCAN;
-
-  if (sync) {
-    success = buf_read_page(m_page_id, m_page_size);
-  } else {
-    dberr_t err;
-
-    auto ret = buf_read_page_low(&err, false, 0, BUF_READ_ANY_PAGE, m_page_id,
-                                 m_page_size, false);
-    success = ret > 0;
-
-    if (success) {
-      srv_stats.buf_pool_reads.add(1);
-    }
-
-    ut_a(err != DB_TABLESPACE_DELETED);
-
-    /* Increment number of I/O operations used for LRU policy. */
-    buf_LRU_stat_inc_io();
-  }
-
-  if (success) {
-    if (sync) {
+  if (buf_read_page(m_page_id, m_page_size)) {
+    /* Avoid doing read-ahead for parallel scans (well, at least currently this
+    flag is used only during the parallel scans). This would cause unnecessary
+    IO when the process is already being parallelized on higher level of
+    abstraction. */
+    if (m_mode != Page_fetch::SCAN) {
       buf_read_ahead_random(m_page_id, m_page_size, ibuf_inside(m_mtr));
     }
     m_retries = 0;
@@ -4304,21 +4306,19 @@ buf_block_t *Buf_fetch<T>::single_page() {
   /* Check if this is the first access to the page */
   const auto access_time = buf_page_is_accessed(&block->page);
 
+  /* This is a heuristic and we don't care about ordering issues. */
+  if (access_time == std::chrono::steady_clock::time_point{}) {
+    buf_page_mutex_enter(block);
+
+    buf_page_set_accessed(&block->page);
+
+    buf_page_mutex_exit(block);
+  }
+
   /* Don't move the page to the head of the LRU list so that the
   page can be discarded quickly if it is not accessed again. */
-  if (m_mode != Page_fetch::SCAN) {
-    /* This is a heuristic and we don't care about ordering issues. */
-    if (access_time == std::chrono::steady_clock::time_point{}) {
-      buf_page_mutex_enter(block);
-
-      buf_page_set_accessed(&block->page);
-
-      buf_page_mutex_exit(block);
-    }
-
-    if (m_mode != Page_fetch::PEEK_IF_IN_POOL) {
-      buf_page_make_young_if_needed(&block->page);
-    }
+  if (m_mode != Page_fetch::PEEK_IF_IN_POOL && m_mode != Page_fetch::SCAN) {
+    buf_page_make_young_if_needed(&block->page);
   }
 
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
@@ -4344,7 +4344,7 @@ buf_block_t *Buf_fetch<T>::single_page() {
 
   mtr_add_page(block);
 
-  if (m_mode != Page_fetch::PEEK_IF_IN_POOL && m_mode != Page_fetch::SCAN &&
+  if (m_mode != Page_fetch::PEEK_IF_IN_POOL &&
       access_time == std::chrono::steady_clock::time_point{}) {
     /* In the case of a first access, try to apply linear read-ahead */
 
@@ -4729,7 +4729,7 @@ static void buf_page_init(buf_pool_t *buf_pool, const page_id_t &page_id,
   ut_ad(buf_pool == buf_pool_get(page_id));
 
   ut_ad(mutex_own(buf_page_get_mutex(&block->page)));
-  ut_a(buf_block_get_state(block) != BUF_BLOCK_FILE_PAGE);
+  ut_a(buf_block_get_state(block) == BUF_BLOCK_READY_FOR_USE);
 
   ut_ad(rw_lock_own(buf_page_hash_lock_get(buf_pool, page_id), RW_LOCK_X));
 
@@ -6864,3 +6864,15 @@ void buf_pool_free_all() {
   buf_pool_free();
 }
 #endif /* !UNIV_HOTBACKUP */
+
+uint16_t buf_block_t::get_page_level() const {
+  ut_ad(frame != nullptr);
+  ut_ad(get_page_type() == FIL_PAGE_INDEX);
+  uint16_t level = mach_read_from_2(frame + PAGE_HEADER + PAGE_LEVEL);
+  ut_ad(level <= BTR_MAX_NODE_LEVEL);
+  return level;
+}
+
+bool buf_block_t::is_empty() const {
+  return page_rec_is_supremum(page_rec_get_next(page_get_infimum_rec(frame)));
+}

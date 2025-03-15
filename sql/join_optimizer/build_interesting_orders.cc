@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -825,11 +826,21 @@ void BuildInterestingOrders(
 
     table_map used_tables = 0;
     bool aggregates_required = false;
+    bool sort_ahead_only = false;
     for (OrderElement element :
          orderings->ordering(ordering_idx).GetElements()) {
       Item *item = orderings->item(element.item);
       used_tables |= item->used_tables();
       aggregates_required |= (item->has_aggregation() || item->has_wf());
+      const Item *real_item = item->real_item();
+      sort_ahead_only =
+          sort_ahead_only ||
+          std::none_of(query_block->join->fields->cbegin(),
+                       query_block->join->fields->cend(),
+                       [real_item](const Item *field) {
+                         return real_item->eq(field->real_item(),
+                                              /*binary_cmp=*/true);
+                       });
     }
     NodeMap required_nodes = GetNodeMapFromTableMap(
         used_tables & ~(INNER_TABLE_BIT | OUTER_REF_TABLE_BIT),
@@ -837,7 +848,8 @@ void BuildInterestingOrders(
 
     ORDER *order = BuildSortAheadOrdering(thd, orderings,
                                           orderings->ordering(ordering_idx));
-    sort_ahead_orderings->push_back(SortAheadOrdering{
-        ordering_idx, required_nodes, aggregates_required, order});
+    sort_ahead_orderings->push_back(
+        SortAheadOrdering{ordering_idx, required_nodes, aggregates_required,
+                          sort_ahead_only, order});
   }
 }

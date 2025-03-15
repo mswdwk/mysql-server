@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -82,6 +83,12 @@ bool opt_sporadic_binlog_dump_fail = false;
 
 malloc_unordered_map<uint32, unique_ptr_my_free<REPLICA_INFO>> slave_list{
     key_memory_REPLICA_INFO};
+
+resource_blocker::Resource &get_dump_thread_resource() {
+  static resource_blocker::Resource dump_thread_resource;
+  return dump_thread_resource;
+}
+
 extern TYPELIB binlog_checksum_typelib;
 
 #define get_object(p, obj, msg)                  \
@@ -99,6 +106,29 @@ extern TYPELIB binlog_checksum_typelib;
     strmake(obj, (char *)p, len);                \
     p += len;                                    \
   }
+
+// returns true if user successfully acquired a resource and false otherwise.
+// In case of failure to use a resource, it concatenates all blocking reeasons
+// and reports all as my_message.
+static bool check_and_report_dump_thread_blocked(
+    resource_blocker::User &rpl_user) {
+  if (rpl_user) {
+    return true;
+  }
+  const auto reasons = rpl_user.block_reasons();
+  std::string all_msgs;
+  bool first = true;
+  for (const auto &reason : reasons) {
+    if (first) {
+      first = false;
+    } else {
+      all_msgs.append(" ");
+    }
+    all_msgs.append(reason);
+  }
+  my_message(ER_SOURCE_FATAL_ERROR_READING_BINLOG, all_msgs.c_str(), MYF(0));
+  return false;
+}
 
 /**
   Register slave in 'slave_list' hash table.
@@ -119,6 +149,14 @@ int register_replica(THD *thd, uchar *packet, size_t packet_length) {
 
   if (check_access(thd, REPL_SLAVE_ACL, any_db, nullptr, nullptr, false, false))
     return 1;
+
+  thd->rpl_thd_ctx.dump_thread_user =
+      resource_blocker::User(get_dump_thread_resource());
+  // failed to create a user, resource is blocked
+  if (!check_and_report_dump_thread_blocked(
+          thd->rpl_thd_ctx.dump_thread_user)) {
+    return 1;
+  }
 
   unique_ptr_my_free<REPLICA_INFO> si((REPLICA_INFO *)my_malloc(
       key_memory_REPLICA_INFO, sizeof(REPLICA_INFO), MYF(MY_WME)));
@@ -905,6 +943,17 @@ bool com_binlog_dump(THD *thd, char *packet, size_t packet_length) {
   thd->enable_slow_log = opt_log_slow_admin_statements;
   if (check_global_access(thd, REPL_SLAVE_ACL)) return false;
 
+  // if we first registered a replica, user will already be initialized and
+  // using a resource
+  if (!thd->rpl_thd_ctx.dump_thread_user) {
+    thd->rpl_thd_ctx.dump_thread_user =
+        resource_blocker::User(get_dump_thread_resource());
+    // failed to create a user, resource is blocked
+    if (!check_and_report_dump_thread_blocked(
+            thd->rpl_thd_ctx.dump_thread_user)) {
+      return false;
+    }
+  }
   /*
     4 bytes is too little, but changing the protocol would break
     compatibility.  This has been fixed in the new protocol. @see
@@ -955,6 +1004,18 @@ bool com_binlog_dump_gtid(THD *thd, char *packet, size_t packet_length) {
   thd->status_var.com_other++;
   thd->enable_slow_log = opt_log_slow_admin_statements;
   if (check_global_access(thd, REPL_SLAVE_ACL)) return false;
+
+  // if we first registered a replica, user will already be initialized and
+  // using a resource
+  if (!thd->rpl_thd_ctx.dump_thread_user) {
+    thd->rpl_thd_ctx.dump_thread_user =
+        resource_blocker::User(get_dump_thread_resource());
+    // failed to create a user, resource is blocked
+    if (!check_and_report_dump_thread_blocked(
+            thd->rpl_thd_ctx.dump_thread_user)) {
+      return false;
+    }
+  }
 
   READ_INT(flags, 2);
   READ_INT(thd->server_id, 4);
@@ -1108,13 +1169,13 @@ void kill_zombie_dump_threads(THD *thd) {
     */
     if (log_error_verbosity > 2) {
       if (replica_uuid.length()) {
-        LogErr(INFORMATION_LEVEL, ER_RPL_ZOMBIE_ENCOUNTERED, "UUID",
-               replica_uuid.c_ptr(), "UUID", tmp_ptr->thread_id());
+        LogErr(INFORMATION_LEVEL, ER_RPL_KILL_OLD_DUMP_THREAD_ENCOUNTERED,
+               "UUID", replica_uuid.c_ptr(), "UUID", tmp_ptr->thread_id());
       } else {
         char numbuf[32];
         snprintf(numbuf, sizeof(numbuf), "%u", thd->server_id);
-        LogErr(INFORMATION_LEVEL, ER_RPL_ZOMBIE_ENCOUNTERED, "server_id",
-               numbuf, "server_id", tmp_ptr->thread_id());
+        LogErr(INFORMATION_LEVEL, ER_RPL_KILL_OLD_DUMP_THREAD_ENCOUNTERED,
+               "server_id", numbuf, "server_id", tmp_ptr->thread_id());
       }
     }
     tmp_ptr->duplicate_slave_id = true;

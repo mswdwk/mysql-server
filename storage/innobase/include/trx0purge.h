@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -33,7 +34,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef trx0purge_h
 #define trx0purge_h
 
-#include <unordered_set>
 #include "fil0fil.h"
 #include "mtr0mtr.h"
 #include "page0page.h"
@@ -1079,8 +1079,9 @@ struct trx_purge_t {
   /** Heap for reading the undo log records */
   mem_heap_t *heap;
 
-  /** Set of all THDs allocated by the purge system. */
-  ut::unordered_set<THD *> thds;
+  /** Is the this thread related to purge? This is false by default and set to
+  true by srv_purge_coordinator_thread() and srv_worker_thread() only. */
+  static inline thread_local bool is_this_a_purge_thread{false};
 
   /** Set of all rseg queue. */
   std::vector<trx_rseg_t *> rsegs_queue;

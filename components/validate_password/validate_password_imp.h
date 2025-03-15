@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,11 +37,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 extern REQUIRES_SERVICE_PLACEHOLDER(registry);
 extern REQUIRES_SERVICE_PLACEHOLDER(log_builtins);
 extern REQUIRES_SERVICE_PLACEHOLDER(log_builtins_string);
+extern REQUIRES_SERVICE_PLACEHOLDER(mysql_string_character_access);
 extern REQUIRES_SERVICE_PLACEHOLDER(mysql_string_factory);
 extern REQUIRES_SERVICE_PLACEHOLDER(mysql_string_case);
 extern REQUIRES_SERVICE_PLACEHOLDER(mysql_string_converter);
 extern REQUIRES_SERVICE_PLACEHOLDER(mysql_string_iterator);
 extern REQUIRES_SERVICE_PLACEHOLDER(mysql_string_ctype);
+extern REQUIRES_SERVICE_PLACEHOLDER(mysql_string_value);
 extern REQUIRES_SERVICE_PLACEHOLDER(component_sys_variable_register);
 extern REQUIRES_SERVICE_PLACEHOLDER(component_sys_variable_unregister);
 extern REQUIRES_SERVICE_PLACEHOLDER(status_variable_registration);
@@ -68,5 +71,25 @@ class validate_password_imp {
   */
   static DEFINE_BOOL_METHOD(get_strength, (void *thd, my_h_string password,
                                            unsigned int *strength));
+};
+
+class validate_password_changed_characters_imp {
+ public:
+  /**
+    Validate if number of changed characters matches the pre-configured
+    criteria
+
+    @param [in]  current_password Current password
+    @param [in]  new_password     New password
+    @param [out] minimum_required Minimum required number of changed characters
+    @param [out] changed          Actual number of changed characters
+
+    @returns Result of validation
+      @retval false Success
+      @retval true  Error
+  */
+  static DEFINE_BOOL_METHOD(validate, (my_h_string current_password,
+                                       my_h_string new_password,
+                                       uint *minimum_required, uint *changed));
 };
 #endif /* VALIDATE_PASSWORD_IMP_H */

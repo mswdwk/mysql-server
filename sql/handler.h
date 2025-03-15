@@ -2,18 +2,19 @@
 #define HANDLER_INCLUDED
 
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -689,7 +690,8 @@ enum enum_binlog_func {
   BFN_RESET_SLAVE = 2,
   BFN_BINLOG_WAIT = 3,
   BFN_BINLOG_END = 4,
-  BFN_BINLOG_PURGE_FILE = 5
+  BFN_BINLOG_PURGE_FILE = 5,
+  BFN_BINLOG_PURGE_WAIT = 6
 };
 
 enum enum_binlog_command {
@@ -2427,6 +2429,32 @@ using compare_secondary_engine_cost_t = bool (*)(THD *thd, const JOIN &join,
 using secondary_engine_modify_access_path_cost_t = bool (*)(
     THD *thd, const JoinHypergraph &hypergraph, AccessPath *access_path);
 
+/**
+  Looks up and returns a specific secondary engine query offload or exec
+  failure reason as a string given a thread context (representing the query)
+  when the offloaded query fails in the secondary storage engine.
+
+  @param thd thread context.
+
+  @retval const char * as the offload failure reason.
+          The memory pointed to is managed by the handlerton and may be freed
+          when the statement completes.
+*/
+using get_secondary_engine_offload_or_exec_fail_reason_t =
+    const char *(*)(THD *thd);
+
+/**
+  Sets a specific secondary engine offload failure reason for a query
+  represented by the thread context when the offloaded query fails in
+  the secondary storage engine.
+
+  @param thd thread context.
+
+  @param const char * as the offload failure reason.
+*/
+using set_secondary_engine_offload_fail_reason_t = void (*)(THD *thd,
+                                                            const char *);
+
 // Capabilities (bit flags) for secondary engines.
 using SecondaryEngineFlags = uint64_t;
 enum class SecondaryEngineFlag : SecondaryEngineFlags {
@@ -2806,6 +2834,23 @@ struct handlerton {
   secondary_engine_modify_access_path_cost_t
       secondary_engine_modify_access_path_cost;
 
+  /// Pointer to a function that returns the query offload or exec failure
+  /// reason as a string given a thread context (representing the query) when
+  /// the offloaded query failed in a secondary storage engine.
+  ///
+  /// @see get_secondary_engine_offload_or_exec_fail_reason_t for function
+  /// signature.
+  get_secondary_engine_offload_or_exec_fail_reason_t
+      get_secondary_engine_offload_or_exec_fail_reason;
+
+  /// Pointer to a function that sets the offload failure reason as a string
+  /// for a thread context (representing the query) when the offloaded query
+  /// failed in a secondary storage engine.
+  ///
+  /// @see set_secondary_engine_offload_fail_reason_t for function signature.
+  set_secondary_engine_offload_fail_reason_t
+      set_secondary_engine_offload_fail_reason;
+
   se_before_commit_t se_before_commit;
   se_after_commit_t se_after_commit;
   se_before_rollback_t se_before_rollback;
@@ -2883,8 +2928,8 @@ constexpr const decltype(handlerton::flags) HTON_SUPPORTS_ENGINE_ATTRIBUTE{
     1 << 17};
 
 /** Engine supports Generated invisible primary key. */
-constexpr const decltype(
-    handlerton::flags) HTON_SUPPORTS_GENERATED_INVISIBLE_PK{1 << 18};
+constexpr const decltype(handlerton::flags)
+    HTON_SUPPORTS_GENERATED_INVISIBLE_PK{1 << 18};
 
 /** Whether the secondary engine supports DDLs. No meaning if the engine is not
  * secondary. */
@@ -2994,7 +3039,9 @@ enum enum_stats_auto_recalc : int {
   HA_STATS_AUTO_RECALC_OFF
 };
 
-/* struct to hold information about the table that should be created */
+/**
+  Struct to hold information about the table that should be created.
+ */
 struct HA_CREATE_INFO {
   const CHARSET_INFO *table_charset{nullptr};
   const CHARSET_INFO *default_table_charset{nullptr};
@@ -3026,6 +3073,8 @@ struct HA_CREATE_INFO {
    * Is nullptr if no secondary engine defined.
    */
   LEX_CSTRING secondary_engine{nullptr, 0};
+  /** Secondary engine load status */
+  bool secondary_load{false};
 
   const char *data_file_name{nullptr};
   const char *index_file_name{nullptr};
@@ -3984,9 +4033,7 @@ class Ft_hints {
 
      @return pointer to ft_hints struct
    */
-  struct ft_hints *get_hints() {
-    return &hints;
-  }
+  struct ft_hints *get_hints() { return &hints; }
 };
 
 /**
@@ -5129,10 +5176,9 @@ class handler {
   double estimate_in_memory_buffer(ulonglong table_index_size) const;
 
  public:
-  virtual ha_rows multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
-                                              void *seq_init_param,
-                                              uint n_ranges, uint *bufsz,
-                                              uint *flags, Cost_estimate *cost);
+  virtual ha_rows multi_range_read_info_const(
+      uint keyno, RANGE_SEQ_IF *seq, void *seq_init_param, uint n_ranges,
+      uint *bufsz, uint *flags, bool *force_default_mrr, Cost_estimate *cost);
   virtual ha_rows multi_range_read_info(uint keyno, uint n_ranges, uint keys,
                                         uint *bufsz, uint *flags,
                                         Cost_estimate *cost);
@@ -6911,6 +6957,19 @@ class handler {
     return mv_key_capacity(num_keys, keys_length);
   }
 
+  /**
+    Propagates the secondary storage engine offload failure reason for a query
+    to the external engine when the offloaded query fails in the secondary
+    storage engine.
+  */
+  virtual void set_external_table_offload_error(const char * /*reason*/) {}
+
+  /**
+    Identifies and throws the propagated external engine query offload or exec
+    failure reason given by the external engine handler.
+  */
+  virtual void external_table_offload_error() const {}
+
  private:
   /**
     Engine-specific function for ha_can_store_mv_keys().
@@ -7299,7 +7358,42 @@ void trans_register_ha(THD *thd, bool all, handlerton *ht,
                        const ulonglong *trxid);
 
 int ha_reset_logs(THD *thd);
+
+/**
+  Inform storage engine(s) that a binary log file will be purged and any
+  references to it should be removed.
+
+  The function is called for all purged files, regardless if it is an explicit
+  PURGE BINARY LOGS statement, or an automatic purge performed by the server.
+
+  @note Since function is called with the LOCK_index mutex held the work
+  performed in this callback should be kept at minimum. One way to defer work is
+  to schedule work and use the `ha_binlog_index_purge_wait` callback to wait for
+  completion.
+
+  @param thd Thread handle of session purging file. The nullptr value indicates
+  that purge is done at server startup.
+  @param file Name of file being purged.
+  @return Always 0, return value are ignored by caller.
+*/
 int ha_binlog_index_purge_file(THD *thd, const char *file);
+
+/**
+  Request the storage engine to complete any operations that were initiated
+  by `ha_binlog_index_purge_file` and which need to complete
+  before PURGE BINARY LOGS completes.
+
+  The function is called only from PURGE BINARY LOGS. Each PURGE BINARY LOGS
+  statement will result in 0, 1 or more calls to `ha_binlog_index_purge_file`,
+  followed by exactly 1 call to `ha_binlog_index_purge_wait`.
+
+  @note This function is called without LOCK_index mutex held and thus any
+  waiting performed will only affect the current session.
+
+  @param thd Thread handle of session.
+*/
+void ha_binlog_index_purge_wait(THD *thd);
+
 void ha_reset_slave(THD *thd);
 void ha_binlog_log_query(THD *thd, handlerton *db_type,
                          enum_binlog_command binlog_command, const char *query,

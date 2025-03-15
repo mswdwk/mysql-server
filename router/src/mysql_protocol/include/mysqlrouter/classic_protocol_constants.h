@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -140,6 +141,7 @@ constexpr value_type compress_zstd{1 << pos::compress_zstd};
 // version_added: 8.0
 constexpr value_type optional_resultset_metadata{
     1 << pos::optional_resultset_metadata};
+// version_added: 8.0
 constexpr value_type query_attributes{1 << pos::query_attributes};
 }  // namespace capabilities
 
@@ -208,19 +210,20 @@ constexpr value_type session_state_changed{1 << pos::session_state_changed};
 namespace cursor {
 namespace pos {
 using value_type = uint8_t;
-constexpr value_type no_cursor{0};
-constexpr value_type read_only{1};
-constexpr value_type for_update{2};
-constexpr value_type scrollable{3};
+constexpr value_type read_only{0};
+constexpr value_type for_update{1};
+constexpr value_type scrollable{2};
+constexpr value_type param_count_available{3};
 
-constexpr value_type _bitset_size{scrollable + 1};
+constexpr value_type _bitset_size{param_count_available + 1};
 }  // namespace pos
 using value_type = std::bitset<pos::_bitset_size>;
 
-constexpr value_type no_cursor{1 << pos::no_cursor};
+constexpr value_type no_cursor{0};
 constexpr value_type read_only{1 << pos::read_only};
 constexpr value_type for_update{1 << pos::for_update};
 constexpr value_type scrollable{1 << pos::scrollable};
+constexpr value_type param_count_available{1 << pos::param_count_available};
 }  // namespace cursor
 
 namespace field_type {

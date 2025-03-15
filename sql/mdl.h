@@ -1,17 +1,18 @@
 #ifndef MDL_H
 #define MDL_H
-/* Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -125,7 +126,7 @@ class MDL_context_owner {
   /**
     Does the owner still have connection to the client?
   */
-  virtual bool is_connected() = 0;
+  virtual bool is_connected(bool = false) = 0;
 
   /**
     Indicates that owner thread might have some commit order (non-MDL) waits
@@ -1741,38 +1742,5 @@ const int32 MDL_LOCKS_UNUSED_LOCKS_LOW_WATER_DEFAULT = 1000;
 const double MDL_LOCKS_UNUSED_LOCKS_MIN_RATIO = 0.25;
 
 int32 mdl_get_unused_locks_count();
-
-/**
-  Inspect if MDL_context is owned by any thread.
-*/
-class MDL_lock_is_owned_visitor : public MDL_context_visitor {
- public:
-  MDL_lock_is_owned_visitor() : m_exists(false) {}
-
-  /**
-    Collects relevant information about the MDL lock owner.
-
-    This function is only called by MDL_context::find_lock_owner() when
-    searching for MDL lock owners to collect extra information about the
-    owner. As we only need to know that the MDL lock is owned, setting
-    m_exists to true is enough.
-  */
-
-  void visit_context(const MDL_context *ctx [[maybe_unused]]) override {
-    m_exists = true;
-  }
-
-  /**
-    Returns if an owner for the MDL lock being inspected exists.
-
-    @return true when MDL lock is owned, false otherwise.
-  */
-
-  bool exists() const { return m_exists; }
-
- private:
-  /* holds information about MDL being owned by any thread */
-  bool m_exists;
-};
 
 #endif

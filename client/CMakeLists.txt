@@ -1,15 +1,16 @@
-# Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2024, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -71,6 +72,11 @@ MYSQL_ADD_EXECUTABLE(mysqltest
   ENABLE_EXPORTS
   LINK_LIBRARIES mysqlclient
   )
+
+IF(MY_COMPILER_IS_GNU AND (WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO))
+  TARGET_LINK_OPTIONS(mysqltest PRIVATE -Wno-error=stringop-overflow)
+ENDIF()
+
 MYSQL_ADD_EXECUTABLE(mysqlcheck
   check/mysqlcheck.cc
   check/mysqlcheck_core.cc
@@ -233,6 +239,23 @@ SET(MYSQLBINLOG_SOURCES
   ${CMAKE_SOURCE_DIR}/sql/rpl_log_encryption.cc
   ${CMAKE_SOURCE_DIR}/libbinlogevents/src/trx_boundary_parser.cpp
   )
+
+# The client version of log_event.cc has false positives.
+# Downgrade from error to warning:
+IF(MY_COMPILER_IS_GNU AND CMAKE_BUILD_TYPE_UPPER STREQUAL "RELWITHDEBINFO")
+  ADD_COMPILE_FLAGS(${CMAKE_SOURCE_DIR}/sql/log_event.cc
+    COMPILE_FLAGS
+    " -Wno-error=uninitialized"
+    " -Wno-error=maybe-uninitialized"
+    )
+ENDIF()
+
+# duplicate explicit instantiation of 'net_field_length_checked'
+# ignored as a Microsoft extension
+IF(WIN32_CLANG)
+  ADD_COMPILE_FLAGS(${CMAKE_SOURCE_DIR}/sql/log_event.cc
+    COMPILE_FLAGS " -Wno-microsoft-template")
+ENDIF()
 
 SET(MYSQLBINLOG_LIBRARIES
   binlogevents_static

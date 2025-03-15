@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -248,6 +249,7 @@ void test_distribution(bool assert_distribution, const std::string &test_name,
 
 TEST(ut0rnd, hash_uint64_distribution) {
   init();
+  ut_crc32_init();
   test_distribution(true, "ut::hash_uint64(i)",
                     [](size_t i, const ut::fast_modulo_t &n) {
                       return ut::hash_uint64(i) % n;
@@ -270,6 +272,7 @@ TEST(ut0rnd, hash_uint32_old_distribution) {
 }
 
 TEST(ut0rnd, hash_uint64_pair_sysbench_ahi_distribution) {
+  ut_crc32_init();
   std::array<size_t, 8> buckets{};
   for (int i = 0; i < 8; i++) {
     uint32_t hash = ut::hash_uint64_pair(149 + 2 * i, i) % 8;
@@ -284,6 +287,37 @@ TEST(ut0rnd, hash_uint64_pair_sysbench_ahi_distribution) {
   }
 
   EXPECT_GE(res, 6);
+
+  if (res < 6) {
+    for (auto a : buckets) {
+      std::cout << a << " ";
+    }
+    std::cout << std::endl;
+  }
+}
+
+/* Test uint64_pair distribution of a sequential BIGINT record as hashed by
+ut::hash_binary(). This method will read it as little-endian, while the InnoDB
+storage format for BIGINT is big-endian. */
+TEST(ut0rnd, hash_uint64_pair_highest_byte_distribution) {
+  ut_crc32_init();
+  /* This test checks if hash_uint64_pair causes collisions when one of the
+  arguments is kept constant, and the other takes consecutive values.
+  Historically, the number of collisions depended mostly on the pattern of
+  lowest bits in the constant, so we try all possible lowest bytes. */
+  for (uint64_t seed = 0; seed < 256; ++seed) {
+    std::set<uint64_t> hashes_left, hashes_right;
+    for (uint64_t highest = 0; highest < 256; highest++) {
+      /* As mentioned in the test, we want to test a real-world example of a
+      BIGINT field as seen by `tuple->fields[0].data`. It has 7 bytes set, with
+      main non-zero part of the value in the highest bytes. The value of
+      `highest` byte will be inserted to the 8th, the highest byte of this
+      value and it represents the lowest byte of the BIGINT field's value. */
+      uint64_t rec = 0x9a533400000080ULL | (highest << (64 - 8));
+      EXPECT_TRUE(hashes_left.insert(ut::hash_uint64_pair(rec, seed)).second);
+      EXPECT_TRUE(hashes_right.insert(ut::hash_uint64_pair(seed, rec)).second);
+    }
+  }
 }
 
 /* Test distributions for algorithms that hash pair of uint32_t that are:
@@ -294,6 +328,7 @@ static void hash_pair_distribution_test(bool assert_distribution,
                                         const std::string &test_name,
                                         THash hasher) {
   init();
+  ut_crc32_init();
   test_distribution(assert_distribution, test_name + "(i, i)",
                     [&hasher](size_t i, const ut::fast_modulo_t &n) {
                       return hasher(i, i) % n;
@@ -324,13 +359,52 @@ TEST(ut0rnd, hash_uint32_pair_old_distribution) {
                               ut::detail::hash_uint32_pair_ib);
 }
 
+static void test_interval_fast_distribution(uint64_t n) {
+  const uint64_t max_count = n * 10000;
+  // min, mid, max are usecases
+  uint64_t target_score[][2] = {{0, 0}, {n / 2, 0}, {n - 1, 0}};
+
+  // variation is needed. not needed to be so accurate always.
+  const uint64_t min_score = 5000;
+  const uint64_t max_score = 17000;
+
+  for (uint64_t i = 0; i < max_count; i++) {
+    const auto value = ut::random_from_interval_fast(0, n - 1);
+    for (auto target : target_score) {
+      if (value == target[0]) {
+        target[1]++;
+      }
+    }
+    ut_delay(ut::random_from_interval_fast(0, 6));
+  }
+
+  for (auto target : target_score) {
+    // EXPECT_GE(target[1], min_score);
+    // EXPECT_LE(target[1], max_score);
+
+    if (target[1] < min_score || target[1] > max_score) {
+      std::cout << "test_interval_fast_distribution " << target[0] << " for 0-"
+                << n - 1 << " : " << target[1] << " / " << max_count
+                << std::endl;
+    }
+  }
+}
+
+TEST(ut0rnd, random_from_interval_fast) {
+  init();
+  test_interval_fast_distribution(2);    // 1/2
+  test_interval_fast_distribution(10);   // 1/10
+  test_interval_fast_distribution(100);  // 1/100
+}
+
 /* Micro-benchmark raw random generator performance. */
 
 template <typename THash>
 static void benchmark_hasher(const size_t num_iterations, THash hasher) {
   init();
+  ut_crc32_init();
 
-  uint32_t fold = 0;
+  uint32_t fold = 1;  // Non-zero value. Some hasher might return 0 for fold==0.
   for (size_t n = 0; n < num_iterations * 1000; n++) {
     fold += hasher(fold, n);
   }
@@ -354,9 +428,9 @@ BENCHMARK(BM_RND_GEN_STD_HASH)
 
 #if SIZEOF_VOIDP >= 8
 static void BM_RND_GEN_STD_LINEAR(const size_t num_iterations) {
-  std::linear_congruential_engine<
-      uint64_t, ut::detail::fast_hash_coeff_a1_64bit,
-      ut::detail::fast_hash_coeff_b_64bit, std::numeric_limits<uint64_t>::max()>
+  std::linear_congruential_engine<uint64_t, 0xacb1f3526e25dd39,
+                                  0xf72a876a516b4b56,
+                                  std::numeric_limits<uint64_t>::max()>
       eng;
   benchmark_hasher(num_iterations,
                    [&eng](uint64_t, uint64_t n) { return eng(); });
@@ -369,6 +443,12 @@ static void BM_RND_GEN(const size_t num_iterations) {
                    [](uint64_t, uint64_t n) { return ut::random_64(); });
 }
 BENCHMARK(BM_RND_GEN)
+
+static void BM_RND_GEN_FAST(const size_t num_iterations) {
+  benchmark_hasher(num_iterations,
+                   [](uint64_t, uint64_t) { return ut::random_64_fast(); });
+}
+BENCHMARK(BM_RND_GEN_FAST)
 
 /* Micro-benchmark raw uint64_t hash performance. */
 

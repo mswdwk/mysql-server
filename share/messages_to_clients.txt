@@ -1,15 +1,16 @@
-# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # Without limiting anything contained in the foregoing, this file,
 # which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -7328,7 +7329,7 @@ ER_CHANGE_SOURCE_PASSWORD_LENGTH
   eng "The password provided for the replication user exceeds the maximum length of 32 characters"
 
 ER_USER_LOCK_WRONG_NAME 42000
-        eng "Incorrect user-level lock name '%-.192s'."
+  eng "Incorrect user-level lock name '%-.192s'. The name is empty, NULL, or can not be expressed in the current character-set."
 
 # Should be different from ER_LOCK_DEADLOCK since it doesn't cause implicit
 # rollback. Should not be mapped to SQLSTATE 40001 for the same reason.
@@ -9952,6 +9953,18 @@ ER_INSTALL_COMPONENT_SET_UNUSED_VALUE
 
 ER_WARN_DEPRECATED_USER_DEFINED_COLLATIONS
   eng "'%s' is a user defined collation. User defined collations are deprecated and will be removed in a future release. Consider using a compiled collation instead."
+
+ER_USER_LOCK_OVERLONG_NAME  42000
+  eng "User-level lock name '%-.192s' should not exceed %d characters."
+
+ER_WARN_NO_SPACE_VERSION_COMMENT
+  eng "Immediately starting the version comment after the version number is deprecated and may change behavior in a future release. Please insert a white-space character after the version number."
+
+ER_VALIDATE_PASSWORD_INSUFFICIENT_CHANGED_CHARACTERS
+  eng "The new password must have at least '%u' characters that are different from the old password. It has only '%u' character(s) different. For this comparison, uppercase letters and lowercase letters are considered to be equal."
+
+ER_WARN_DEPRECATED_WITH_NOTE
+  eng "'%s' is deprecated and will be removed in a future release. %s"
 
 #
 #  End of 8.0 error messages (server-to-client).

@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2024, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -599,8 +600,8 @@ static inline void btr_node_ptr_set_child_page_no(
   ut_ad(!rec_offs_comp(offsets) || rec_get_node_ptr_flag(rec));
 
   /* The child address is in the last field */
-  field = const_cast<byte *>(rec_get_nth_field(
-      nullptr, rec, offsets, rec_offs_n_fields(offsets) - 1, &len));
+  field = rec_get_nth_field(nullptr, rec, offsets,
+                            rec_offs_n_fields(offsets) - 1, &len);
 
   ut_ad(len == REC_NODE_PTR_SIZE);
 
@@ -2773,6 +2774,16 @@ void btr_set_min_rec_mark(rec_t *rec, mtr_t *mtr) {
 }
 
 #ifndef UNIV_HOTBACKUP
+bool btr_is_index_empty(const dict_index_t *index) {
+  mtr_t mtr;
+  mtr.start();
+  buf_block_t *block = btr_root_block_get(index, RW_X_LATCH, &mtr);
+  const bool is_empty =
+      block->is_index_page() && block->is_leaf() && block->is_empty();
+  mtr.commit();
+  return is_empty;
+}
+
 /** Deletes on the upper level the node pointer to a page.
 @param[in] index Index tree
 @param[in] block Page whose node pointer is deleted

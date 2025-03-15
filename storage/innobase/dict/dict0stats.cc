@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+Copyright (c) 2009, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -426,8 +427,8 @@ static void dict_stats_empty_table(dict_table_t *table) /*!< in/out: table */
 }
 
 /** Check whether index's stats are initialized (assert if they are not). */
-static void dict_stats_assert_initialized_index(const dict_index_t *index [
-    [maybe_unused]]) /*!< in: index */
+static void dict_stats_assert_initialized_index(
+    const dict_index_t *index [[maybe_unused]]) /*!< in: index */
 {
   UNIV_MEM_ASSERT_RW_ABORT(
       index->stat_n_diff_key_vals,

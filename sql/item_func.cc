@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -252,19 +253,17 @@ bool simplify_string_args(THD *thd, const DTCollation &c, Item **args,
   @returns string pointer if success, NULL if error or NULL value
 */
 
-String *eval_string_arg(const CHARSET_INFO *to_cs, Item *arg, String *buffer) {
-  StringBuffer<STRING_BUFFER_USUAL_SIZE> local_string(nullptr, 0, to_cs);
-
+String *eval_string_arg_noinline(const CHARSET_INFO *to_cs, Item *arg,
+                                 String *buffer) {
   size_t offset;
   const bool convert =
       String::needs_conversion(0, arg->collation.collation, to_cs, &offset);
-  String *res = arg->val_str(convert ? &local_string : buffer);
 
-  // Return immediately if argument is a NULL value, or there was an error
-  if (res == nullptr) {
-    return nullptr;
-  }
   if (convert) {
+    StringBuffer<STRING_BUFFER_USUAL_SIZE> local_string(nullptr, 0, to_cs);
+    String *res = arg->val_str(&local_string);
+    // Return immediately if argument is a NULL value, or there was an error
+    if (res == nullptr) return nullptr;
     /*
       String must be converted from source character set. It has been built
       in the "local_string" buffer and will be copied with conversion into the
@@ -279,6 +278,10 @@ String *eval_string_arg(const CHARSET_INFO *to_cs, Item *arg, String *buffer) {
     }
     return buffer;
   }
+  String *res = arg->val_str(buffer);
+  // Return immediately if argument is a NULL value, or there was an error
+  if (res == nullptr) return nullptr;
+
   // If source is a binary string, the string may have to be validated:
   if (to_cs != &my_charset_bin && arg->collation.collation == &my_charset_bin &&
       !res->is_valid_string(to_cs)) {
@@ -752,10 +755,11 @@ bool Item_func::eq(const Item *item, bool binary_cmp) const {
   /* Assume we don't have rtti */
   if (this == item) return true;
   if (item->type() != FUNC_ITEM) return false;
+  const Item_func::Functype func_type = functype();
   const Item_func *item_func = down_cast<const Item_func *>(item);
-  Item_func::Functype func_type;
-  if ((func_type = functype()) != item_func->functype() ||
-      arg_count != item_func->arg_count ||
+
+  if ((func_type != item_func->functype()) ||
+      (arg_count != item_func->arg_count) ||
       (func_type != Item_func::FUNC_SP &&
        strcmp(func_name(), item_func->func_name()) != 0) ||
       (func_type == Item_func::FUNC_SP &&
@@ -1500,13 +1504,11 @@ void Item_num_op::set_numeric_type(void) {
     hybrid_type = INT_RESULT;
     result_precision();
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 }
 
 /**
@@ -1536,13 +1538,11 @@ void Item_func_num1::set_numeric_type() {
     default:
       assert(0);
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 }
 
 void Item_func_num1::fix_num_length_and_dec() {
@@ -3004,9 +3004,11 @@ template <bool to_left>
 longlong Item_func_shift::eval_int_op() {
   assert(fixed);
   ulonglong res = args[0]->val_uint();
+  if (current_thd->is_error()) return error_int();
   if (args[0]->null_value) return error_int();
 
   ulonglong shift = args[1]->val_uint();
+  if (current_thd->is_error()) return error_int();
   if (args[1]->null_value) return error_int();
 
   null_value = false;
@@ -3030,11 +3032,13 @@ String *Item_func_shift::eval_str_op(String *) {
 
   String tmp_str;
   String *arg = args[0]->val_str(&tmp_str);
-  if (!arg || args[0]->null_value) return error_str();
+  if (current_thd->is_error()) return error_str();
+  if (args[0]->null_value) return error_str();
 
   ssize_t arg_length = arg->length();
   size_t shift =
       min(args[1]->val_uint(), static_cast<ulonglong>(arg_length) * 8);
+  if (current_thd->is_error()) return error_str();
   if (args[1]->null_value) return error_str();
 
   if (tmp_value.alloc(arg->length())) return error_str();
@@ -3289,13 +3293,11 @@ bool Item_func_int_val::resolve_type_inner(THD *) {
     default:
       assert(0);
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 
   return false;
 }
@@ -4286,6 +4288,8 @@ bool Item_func_find_in_set::resolve_type(THD *thd) {
   if (args[0]->const_item() && args[1]->type() == FIELD_ITEM &&
       args[0]->may_eval_const_item(thd)) {
     Field *field = down_cast<Item_field *>(args[1])->field;
+    // Bail during CREATE TABLE/INDEX so we don't look for absent typelib.
+    if (field->is_wrapper_field()) return false;
     if (field->real_type() == MYSQL_TYPE_SET) {
       String *find = args[0]->val_str(&value);
       if (thd->is_error()) return true;
@@ -4485,6 +4489,8 @@ bool udf_handler::fix_fields(THD *thd, Item_result_field *func, uint arg_count,
   args = arguments;
 
   m_initialized = true;  // Use count was incremented by find_udf()
+  const bool is_in_prepare =
+      thd->stmt_arena->is_stmt_prepare() && !thd->stmt_arena->is_repreparing;
   /*
     RAII wrapper to free the memory allocated in case of any failure while
     initializing the UDF
@@ -4520,6 +4526,12 @@ bool udf_handler::fix_fields(THD *thd, Item_result_field *func, uint arg_count,
       if (!(*arg)->fixed && (*arg)->fix_fields(thd, arg)) {
         return true;
       }
+
+      if ((*arg)->data_type() == MYSQL_TYPE_INVALID &&
+          (*arg)->propagate_type(thd, MYSQL_TYPE_VARCHAR)) {
+        return true;
+      }
+
       // we can't assign 'item' before, because fix_fields() can change arg
       Item *item = *arg;
       if (item->check_cols(1)) {
@@ -4594,8 +4606,7 @@ bool udf_handler::fix_fields(THD *thd, Item_result_field *func, uint arg_count,
   initid.ptr = nullptr;
   initid.extension = &m_return_value_extension;
 
-  if (thd->stmt_arena->is_stmt_prepare() && !thd->stmt_arena->is_repreparing &&
-      !initid.const_item) {
+  if (is_in_prepare && !initid.const_item) {
     udf_fun_guard.defer();
     return false;
   }
@@ -5301,7 +5312,11 @@ static bool check_and_convert_ull_name(char *buff, const String *org_name) {
   if (well_formed_error_pos || cannot_convert_error_pos ||
       from_end_pos < org_name->ptr() + org_name->length()) {
     ErrConvString err(org_name);
-    my_error(ER_USER_LOCK_WRONG_NAME, MYF(0), err.ptr());
+    if (well_formed_error_pos || cannot_convert_error_pos)
+      my_error(ER_USER_LOCK_WRONG_NAME, MYF(0), err.ptr());
+    else
+      my_error(ER_USER_LOCK_OVERLONG_NAME, MYF(0), err.ptr(),
+               (int)NAME_CHAR_LEN);
     return true;
   }
 
@@ -6006,8 +6021,9 @@ bool user_var_entry::store(const void *from, size_t length, Item_result type) {
     const my_decimal *dec = static_cast<const my_decimal *>(from);
     dec->sanity_check();
     new (m_ptr) my_decimal(*dec);
-  } else
+  } else if (length > 0) {
     memcpy(m_ptr, from, length);
+  }
 
   m_length = length;
   m_type = type;
@@ -6050,14 +6066,9 @@ bool Item_func_set_user_var::update_hash(const void *ptr, uint length,
 
   // args[0]->null_value could be outdated
   if (args[0]->type() == Item::FIELD_ITEM)
-    null_value = ((Item_field *)args[0])->field->is_null();
+    null_value = down_cast<Item_field *>(args[0])->field->is_null();
   else
     null_value = args[0]->null_value;
-
-  if (ptr == nullptr) {
-    assert(length == 0);
-    null_value = true;
-  }
 
   /*
     If we set a variable explicitly to NULL then keep the old
@@ -7619,6 +7630,13 @@ bool Item_func_match::fix_fields(THD *thd, Item **ref) {
                                             arg_count, 0);
 }
 
+void Item_func_match::update_used_tables() {
+  Item_func::update_used_tables();
+  against->update_used_tables();
+  used_tables_cache |= against->used_tables();
+  add_accum_properties(against);
+}
+
 bool Item_func_match::fix_index(const THD *thd) {
   TABLE *table;
   uint ft_to_key[MAX_KEY], ft_cnt[MAX_KEY], fts = 0, keynr;
@@ -8371,12 +8389,11 @@ bool Item_func_sp::fix_fields(THD *thd, Item **ref) {
     if (args[i]->data_type() == MYSQL_TYPE_INVALID) {
       sp_variable *var = sp_ctx->find_variable(i);
       if (args[i]->propagate_type(
-              thd,
-              is_numeric_type(var->type)
-                  ? Type_properties(var->type, var->field_def.is_unsigned)
-                  : is_string_type(var->type)
-                        ? Type_properties(var->type, var->field_def.charset)
-                        : Type_properties(var->type)))
+              thd, is_numeric_type(var->type)
+                       ? Type_properties(var->type, var->field_def.is_unsigned)
+                   : is_string_type(var->type)
+                       ? Type_properties(var->type, var->field_def.charset)
+                       : Type_properties(var->type)))
         return true;
     }
   }
@@ -8604,7 +8621,7 @@ static bool check_table_and_trigger_access(Item **args, bool check_trigger_acl,
   }
 
   // Check access
-  ulong db_access = 0;
+  Access_bitmask db_access = 0;
   if (check_access(thd, SELECT_ACL, schema_name_ptr->ptr(), &db_access, nullptr,
                    false, true))
     return false;

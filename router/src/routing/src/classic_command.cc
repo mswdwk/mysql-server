@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,6 +29,7 @@
 #include <memory>  // make_unique
 #include <string>
 
+#include "await_client_or_server.h"
 #include "classic_binlog_dump_forwarder.h"
 #include "classic_change_user_forwarder.h"
 #include "classic_clone_forwarder.h"
@@ -54,6 +56,7 @@
 #include "harness_assert.h"
 #include "hexify.h"
 #include "mysql/harness/logging/logging.h"
+#include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/tls_error.h"
 #include "mysqld_error.h"
 #include "mysqlrouter/connection_pool.h"
@@ -70,10 +73,6 @@ stdx::expected<Processor::Result, std::error_code> CommandProcessor::process() {
       return is_authed();
     case Stage::WaitBoth:
       return wait_both();
-    case Stage::WaitClientCancelled:
-      return wait_client_cancelled();
-    case Stage::WaitServerCancelled:
-      return wait_server_cancelled();
     case Stage::Command:
       return command();
     case Stage::Done:
@@ -231,6 +230,77 @@ class ShowWarningsHandler : public QuerySender::Handler {
   bool something_failed_{false};
 };
 
+class SelectSessionCollationConnectionHandler : public QuerySender::Handler {
+ public:
+  SelectSessionCollationConnectionHandler(
+      MysqlRoutingClassicConnectionBase *connection)
+      : connection_(connection) {}
+
+  void on_column_count(uint64_t count) override {
+    col_count_ = count;
+
+    if (col_count_ != 1) {
+      something_failed_ = true;
+    }
+  }
+
+  void on_column(
+      const classic_protocol::message::server::ColumnMeta &col) override {
+    if (something_failed_) return;
+
+    if (col.name() != "@@SESSION.collation_connection") {
+      something_failed_ = true;
+    }
+  }
+
+  void on_row(const classic_protocol::message::server::Row &row) override {
+    if (something_failed_) return;
+
+    auto it = row.begin();  // row[0]
+
+    if (!it->has_value()) {
+      something_failed_ = true;
+      return;
+    }
+
+    collation_connection_ = *it;
+  }
+
+  void on_row_end(
+      const classic_protocol::message::server::Eof & /* eof */) override {
+    if (something_failed_) {
+      // something failed when parsing the resultset. Disable sharing for now.
+      connection_->some_state_changed(true);
+    } else {
+      // all rows received,
+      connection_->execution_context().system_variables().set(
+          "collation_connection", collation_connection_);
+
+      connection_->collation_connection_maybe_dirty(false);
+    }
+  }
+
+  void on_ok(const classic_protocol::message::server::Ok & /* ok */) override {
+    // ok, shouldn't happen. Disable sharing for now.
+    connection_->some_state_changed(true);
+  }
+
+  void on_error(
+      const classic_protocol::message::server::Error & /* err */) override {
+    // error, shouldn't happen. Disable sharing for now.
+    connection_->some_state_changed(true);
+  }
+
+ private:
+  uint64_t col_count_{};
+  uint64_t col_cur_{};
+  MysqlRoutingClassicConnectionBase *connection_;
+
+  bool something_failed_{false};
+
+  Value collation_connection_{std::nullopt};
+};
+
 /**
  * wait for an read-event from client and server at the same time.
  *
@@ -245,75 +315,49 @@ class ShowWarningsHandler : public QuerySender::Handler {
  */
 stdx::expected<Processor::Result, std::error_code>
 CommandProcessor::wait_both() {
-  auto *socket_splicer = connection()->socket_splicer();
+  if (wait_both_result_) {
+    switch (*wait_both_result_) {
+      case AwaitClientOrServerProcessor::AwaitResult::ClientReadable:
+        stage(Stage::Command);
 
-  if (connection()->recv_from_either() ==
-      MysqlRoutingClassicConnectionBase::FromEither::RecvedFromServer) {
-    // server side sent something.
-    //
-    // - cancel the client side
-    // - read from server in ::wait_client_cancelled
+        return Result::Again;
+      case AwaitClientOrServerProcessor::AwaitResult::ServerReadable: {
+        auto *socket_splicer = connection()->socket_splicer();
 
-    stage(Stage::WaitClientCancelled);
+        auto *src_channel = socket_splicer->server_channel();
+        auto *src_protocol = connection()->server_protocol();
 
-    (void)socket_splicer->client_conn().cancel();
+        auto read_res =
+            ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
+        if (!read_res) return recv_server_failed(read_res.error());
 
-    // end this execution branch.
-    return Result::Void;
-  } else if (connection()->recv_from_either() ==
-             MysqlRoutingClassicConnectionBase::FromEither::RecvedFromClient) {
-    // client side sent something
-    //
-    // - cancel the server side
-    // - read from client in ::wait_server_cancelled
-    stage(Stage::WaitServerCancelled);
+        stage(Stage::Done);
 
-    (void)socket_splicer->server_conn().cancel();
+        if (auto &tr = tracer()) {
+          tr.trace(Tracer::Event().stage("server::error"));
+        }
 
-    // end this execution branch.
-    return Result::Void;
+        // should be a Error packet.
+        return forward_server_to_client();
+      }
+    }
+
+    harness_assert_this_should_not_execute();
+  } else {
+    return stdx::make_unexpected(wait_both_result_.error());
   }
-
-  harness_assert_this_should_not_execute();
-}
-
-stdx::expected<Processor::Result, std::error_code>
-CommandProcessor::wait_server_cancelled() {
-  stage(Stage::Command);
-
-  return Result::Again;
-}
-
-/**
- * read-event from server while waiting for client command.
- *
- * - either a connection-close by the server or
- * - ERR packet before connection-close.
- */
-stdx::expected<Processor::Result, std::error_code>
-CommandProcessor::wait_client_cancelled() {
-  auto *socket_splicer = connection()->socket_splicer();
-
-  auto dst_channel = socket_splicer->server_channel();
-  auto dst_protocol = connection()->server_protocol();
-
-  auto read_res =
-      ClassicFrame::ensure_has_msg_prefix(dst_channel, dst_protocol);
-  if (!read_res) return recv_server_failed(read_res.error());
-
-  if (auto &tr = tracer()) {
-    tr.trace(Tracer::Event().stage("server::error"));
-  }
-
-  // should be a Error packet.
-  return forward_server_to_client();
 }
 
 stdx::expected<Processor::Result, std::error_code> CommandProcessor::command() {
   auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->client_channel();
-  auto src_protocol = connection()->client_protocol();
+  auto *src_channel = socket_splicer->client_channel();
+  auto *src_protocol = connection()->client_protocol();
   auto &server_conn = socket_splicer->server_conn();
+
+  if (connection()->disconnect_requested()) {
+    stage(Stage::Done);
+    return Result::Again;
+  }
 
   auto read_res =
       ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
@@ -344,6 +388,15 @@ stdx::expected<Processor::Result, std::error_code> CommandProcessor::command() {
           connection()->push_processor(std::make_unique<QuerySender>(
               connection(), "SHOW WARNINGS",
               std::make_unique<ShowWarningsHandler>(connection())));
+
+          return Result::Again;
+        }
+
+        if (connection()->collation_connection_maybe_dirty()) {
+          connection()->push_processor(std::make_unique<QuerySender>(
+              connection(), "SELECT @@SESSION.collation_connection",
+              std::make_unique<SelectSessionCollationConnectionHandler>(
+                  connection())));
 
           return Result::Again;
         }
@@ -384,19 +437,30 @@ stdx::expected<Processor::Result, std::error_code> CommandProcessor::command() {
         //
         // watch server-side for connection-close
 
+        connection()->push_processor(
+            std::make_unique<AwaitClientOrServerProcessor>(
+                connection(),
+                [this](auto result) { wait_both_result_ = result; }));
+
         stage(Stage::WaitBoth);
 
-        connection()->recv_from_either(
-            MysqlRoutingClassicConnectionBase::FromEither::Started);
-
-        return Result::RecvFromBoth;
+        return Result::Again;
       }
+    }
+
+    if (ec == TlsErrc::kZeroReturn) {
+      // close the connection without a quit.
+      stage(Stage::Done);
+      return Result::Again;
     }
 
     return recv_client_failed(ec);
   }
 
   const uint8_t msg_type = src_protocol->current_msg_type().value();
+
+  connection()->client_protocol()->seq_id(
+      src_protocol->current_frame()->seq_id_);
 
   namespace client = classic_protocol::message::client;
 

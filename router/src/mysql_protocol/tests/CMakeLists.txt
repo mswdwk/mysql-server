@@ -1,15 +1,16 @@
-# Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,6 +24,7 @@
 SET(TEST_MODULE mysql_protocol)
 
 FOREACH(test_file
+    test_classic_protocol_binary.cc
     test_classic_protocol_frame.cc
     test_classic_protocol_message.cc
     test_classic_protocol_session_track.cc
@@ -85,7 +87,11 @@ IF(LIBFUZZER_COMPILE_FLAGS)
       # daemon
       binlog_dump_gtid
       reset_connection
-      clone)
+      clone
+
+      binary_datetime
+      binary_time
+      )
     MYSQL_ADD_EXECUTABLE(routertest_fuzz_mysql_protocol_${CMD}
       fuzz_${CMD}.cc
       COMPONENT Router

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -50,9 +51,7 @@
 #include <openssl/decoder.h>     // OSSL_DECODER...
 #endif
 
-#if OPENSSL_VERSION_NUMBER < ROUTER_OPENSSL_VERSION(3, 0, 0)
-#include <dh_keys.h>
-#endif
+#include <dh_ecdh_config.h>
 
 // type == decltype(BN_num_bits())
 #if OPENSSL_VERSION_NUMBER >= ROUTER_OPENSSL_VERSION(1, 0, 2)
@@ -272,46 +271,9 @@ stdx::expected<void, std::error_code> set_dh_params_from_filename(
  * set auto DH params at SSL_CTX.
  */
 stdx::expected<void, std::error_code> set_auto_dh_params(SSL_CTX *ssl_ctx) {
-#if OPENSSL_VERSION_NUMBER >= ROUTER_OPENSSL_VERSION(3, 0, 0)
-  SSL_CTX_set_dh_auto(ssl_ctx, 1);
-#else
-#if OPENSSL_VERSION_NUMBER >= ROUTER_OPENSSL_VERSION(1, 1, 0)
-  int sec_level = SSL_CTX_get_security_level(ssl_ctx);
-
-  assert(sec_level <= kMaxSecurityLevel);
-
-  /* current range for security level is [1,5] */
-  if (sec_level > kMaxSecurityLevel)
-    sec_level = kMaxSecurityLevel;
-  else if (sec_level <= 1)
-    sec_level = 2;
-
-  static_assert(dh_keys.size() >= 5);
-
-  OsslUniquePtr<BIO> bio_storage{
-      BIO_new_mem_buf(const_cast<char *>(dh_keys[sec_level].data()),
-                      dh_keys[sec_level].size())};
-  auto *bio = bio_storage.get();
-
-  OsslUniquePtr<DH> dh_storage(PEM_read_bio_DHparams(bio, NULL, NULL, NULL));
-#else
-  const int default_sec_level = 2;
-
-  static_assert(dh_keys.size() >= 5);
-
-  OsslUniquePtr<BIO> bio_storage{
-      BIO_new_mem_buf(const_cast<char *>(dh_keys[default_sec_level].data()),
-                      dh_keys[default_sec_level].size())};
-  auto *bio = bio_storage.get();
-
-  OsslUniquePtr<DH> dh_storage(PEM_read_bio_DHparams(bio, NULL, NULL, NULL));
-#endif
-  DH *dh = dh_storage.get();
-
-  if (1 != SSL_CTX_set_tmp_dh(ssl_ctx, dh)) {
+  if (false != set_dh(ssl_ctx)) {
     return stdx::make_unexpected(make_tls_error());
   }
-#endif
 
   return {};
 }
@@ -320,16 +282,7 @@ stdx::expected<void, std::error_code> set_auto_dh_params(SSL_CTX *ssl_ctx) {
 TlsServerContext::TlsServerContext(TlsVersion min_ver, TlsVersion max_ver)
     : TlsContext(server_method) {
   version_range(min_ver, max_ver);
-#if OPENSSL_VERSION_NUMBER >= ROUTER_OPENSSL_VERSION(1, 0, 2)
-  (void)SSL_CTX_set_ecdh_auto(ssl_ctx_.get(), 1);
-#elif OPENSSL_VERSION_NUMBER >= ROUTER_OPENSSL_VERSION(1, 0, 1)
-  // openssl 1.0.1 has no ecdh_auto(), and needs an explicit EC curve set
-  // to make ECDHE ciphers work out of the box.
-  {
-    OsslUniquePtr<EC_KEY> curve(EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
-    if (curve) SSL_CTX_set_tmp_ecdh(ssl_ctx_.get(), curve.get());
-  }
-#endif
+  (void)set_ecdh(ssl_ctx_.get());
   SSL_CTX_set_options(ssl_ctx_.get(), SSL_OP_NO_COMPRESSION);
   cipher_list("ALL");  // ALL - unacceptable ciphers
 }
@@ -350,13 +303,21 @@ stdx::expected<void, std::error_code> TlsServerContext::load_key_and_cert(
   // internal pointer, don't free
   if (X509 *x509 = SSL_CTX_get0_certificate(ssl_ctx_.get())) {
     auto key_size_res = get_rsa_key_size(x509);
-    if (!key_size_res) return stdx::make_unexpected(key_size_res.error());
+    if (!key_size_res) {
+      auto ec = key_size_res.error();
 
-    const auto key_size = *key_size_res;
+      if (ec != TlsCertErrc::kNoRSACert) {
+        return stdx::make_unexpected(key_size_res.error());
+      }
 
-    if (key_size < kMinRsaKeySize) {
-      return stdx::make_unexpected(
-          make_error_code(TlsCertErrc::kRSAKeySizeToSmall));
+      // if it isn't a RSA Key ... just continue.
+    } else {
+      const auto key_size = *key_size_res;
+
+      if (key_size < kMinRsaKeySize) {
+        return stdx::make_unexpected(
+            make_error_code(TlsCertErrc::kRSAKeySizeToSmall));
+      }
     }
   } else {
     // doesn't exist
@@ -501,8 +462,9 @@ std::vector<std::string> TlsServerContext::default_ciphers() {
   // required by RFC5246, but quite likely removed by the !SSLv3 filter
   const std::vector<std::string> optional_p3{"AES128-SHA"};
 
-  std::vector<std::string> out(mandatory_p1.size() + optional_p1.size() +
-                               optional_p2.size() + optional_p3.size());
+  std::vector<std::string> out;
+  out.reserve(mandatory_p1.size() + optional_p1.size() + optional_p2.size() +
+              optional_p3.size());
   for (const std::vector<std::string> &a :
        std::vector<std::vector<std::string>>{mandatory_p1, optional_p1,
                                              optional_p2, optional_p3}) {

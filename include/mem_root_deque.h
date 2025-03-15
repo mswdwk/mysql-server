@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -150,6 +151,7 @@ class mem_root_deque {
       : m_blocks(other.m_blocks),
         m_begin_idx(other.m_begin_idx),
         m_end_idx(other.m_end_idx),
+        m_capacity(other.m_capacity),
         m_root(other.m_root) {
     other.m_blocks = nullptr;
     other.m_begin_idx = other.m_end_idx = other.m_capacity = 0;
@@ -379,12 +381,12 @@ class mem_root_deque {
       return *this;
     }
 
-    Iterator operator+(difference_type offset) {
+    Iterator operator+(difference_type offset) const {
       assert_not_invalidated();
       return Iterator{m_deque, m_physical_idx + offset};
     }
 
-    Iterator operator-(difference_type offset) {
+    Iterator operator-(difference_type offset) const {
       assert_not_invalidated();
       return Iterator{m_deque, m_physical_idx - offset};
     }

@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -35,6 +36,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #define dict0dict_h
 
 #include <set>
+#include <vector>
 
 #include <deque>
 #include "data0data.h"
@@ -286,6 +288,10 @@ in constraints which reference it */
 @param[in,out]  index   index to remove, this object is destroyed and must not
 be accessed by the caller afterwards */
 void dict_index_remove_from_cache(dict_table_t *table, dict_index_t *index);
+
+/** Gathers ids of all tables in cache at the moment.
+@return ids of all tables */
+std::vector<table_id_t> dict_get_all_table_ids();
 
 /** Change the id of a table object in the dictionary cache. This is used in
  DISCARD TABLESPACE. */
@@ -1287,9 +1293,9 @@ class DDTableBuffer {
   has to delete the returned std::string object by ut::delete_
   @param[in]    id      table id
   @param[out]   version table dynamic metadata version
-  @return the metadata saved in a string object, if nothing, the
-  string would be of length 0 */
-  std::string *get(table_id_t id, uint64_t *version);
+  @return the metadata saved in a vector object, if nothing, the
+  vector would be empty */
+  std::vector<byte> get(table_id_t id, uint64_t *version);
 
  private:
   /** Initialize m_index, the in-memory clustered index of the table

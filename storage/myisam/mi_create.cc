@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -202,9 +203,9 @@ int mi_create(const char *name, uint keys, MI_KEYDEF *keydefs, uint columns,
     else
       ci->data_file_length = (ulonglong)ci->max_rows * pack_reclength;
   } else if (!ci->max_rows)
-    ci->max_rows = (ha_rows)(
-        ci->data_file_length /
-        (min_pack_length + ((options & HA_OPTION_PACK_RECORD) ? 3 : 0)));
+    ci->max_rows = (ha_rows)(ci->data_file_length /
+                             (min_pack_length +
+                              ((options & HA_OPTION_PACK_RECORD) ? 3 : 0)));
 
   if (options & (HA_OPTION_COMPRESS_RECORD | HA_OPTION_PACK_RECORD))
     pointer =

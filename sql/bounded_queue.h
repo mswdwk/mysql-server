@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -99,9 +100,11 @@ class Bounded_queue {
     Calls m_sort_param::make_sortkey() to generate a key for the element.
 
     @param opaque    Parameter to send on to make_sortkey().
+
+    @retval false OK, true error.
    */
   template <class Opaque>
-  void push(const Opaque &opaque) {
+  [[nodiscard]] bool push(const Opaque &opaque) {
     /*
       Add one extra byte to each key, so that sort-key generating functions
       won't be returning out-of-space. Since we know there's always room
@@ -115,19 +118,22 @@ class Bounded_queue {
 
     if (m_queue.size() == m_queue.capacity()) {
       const Key_type &pq_top = m_queue.top();
-      [[maybe_unused]] const uint rec_sz =
+      const uint rec_sz =
           m_sort_param->make_sortkey(pq_top, element_size, opaque);
       // UINT_MAX means error, but we do not want to add a dependency
       // on class THD here, as in current_thd->is_error().
-      assert(rec_sz <= m_element_size || rec_sz == UINT_MAX);
+      if (rec_sz == UINT_MAX) return true;
+      assert(rec_sz <= m_element_size);
       m_queue.update_top();
+      return false;
     } else {
-      [[maybe_unused]] const uint rec_sz = m_sort_param->make_sortkey(
+      const uint rec_sz = m_sort_param->make_sortkey(
           m_sort_keys[m_queue.size()], element_size, opaque);
       // UINT_MAX means error, but we do not want to add a dependency
       // on class THD here, as in current_thd->is_error().
-      assert(rec_sz <= m_element_size || rec_sz == UINT_MAX);
-      m_queue.push(m_sort_keys[m_queue.size()]);
+      if (rec_sz == UINT_MAX) return true;
+      assert(rec_sz <= m_element_size);
+      return m_queue.push(m_sort_keys[m_queue.size()]);
     }
   }
 

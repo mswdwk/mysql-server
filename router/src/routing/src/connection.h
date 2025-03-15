@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -53,21 +54,15 @@ class MySQLRoutingConnectionBase {
 
   virtual std::string get_destination_id() const = 0;
 
-  /**
-   * @brief Returns address of server to which connection is established.
-   *
-   * @return address of server
-   */
-  virtual std::string get_server_address() const = 0;
+  void server_address(const std::string &dest) {
+    stats_([&dest](Stats &stats) { stats.server_address = dest; });
+  }
 
   virtual void disconnect() = 0;
 
-  /**
-   * @brief Returns address of client which connected to router
-   *
-   * @return address of client
-   */
-  virtual std::string get_client_address() const = 0;
+  void client_address(const std::string &dest) {
+    stats_([&dest](Stats &stats) { stats.client_address = dest; });
+  }
 
   std::size_t get_bytes_up() const {
     return stats_([](const Stats &stats) { return stats.bytes_up; });
@@ -98,6 +93,9 @@ class MySQLRoutingConnectionBase {
   }
 
   struct Stats {
+    std::string client_address;
+    std::string server_address;
+
     std::size_t bytes_up{0};
     std::size_t bytes_down{0};
 
@@ -131,11 +129,15 @@ class MySQLRoutingConnectionBase {
 
   void accepted();
 
-  void connected();
+  virtual void connected();
 
   template <class F>
   auto disconnect_request(F &&f) {
     return disconnect_(std::forward<F>(f));
+  }
+
+  bool disconnect_requested() const {
+    return disconnect_([](auto requested) { return requested; });
   }
 
  protected:

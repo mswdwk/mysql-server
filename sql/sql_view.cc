@@ -1,15 +1,16 @@
-/* Copyright (c) 2004, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2004, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -658,15 +659,16 @@ bool mysql_create_view(THD *thd, Table_ref *views, enum_view_create_mode mode) {
        This will hold the intersection of the privileges on all columns in the
        view.
      */
-    uint final_priv = VIEW_ANY_ACL;
+    Access_bitmask final_priv = VIEW_ANY_ACL;
 
     for (sl = query_block; sl; sl = sl->next_query_block()) {
       assert(view->db); /* Must be set in the parser */
       for (Item *item : sl->visible_fields()) {
         Item_field *fld = item->field_for_view_update();
-        uint priv = (get_column_grant(thd, &view->grant, view->db,
-                                      view->table_name, item->item_name.ptr()) &
-                     VIEW_ANY_ACL);
+        Access_bitmask priv =
+            (get_column_grant(thd, &view->grant, view->db, view->table_name,
+                              item->item_name.ptr()) &
+             VIEW_ANY_ACL);
 
         if (fld && !fld->field->table->s->tmp_table) {
           final_priv &= fld->have_privileges;
@@ -1758,8 +1760,11 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
   dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
   Security_context *sctx = thd->security_context();
 
-  // First check which views exist
   String non_existant_views;
+  bool view_does_not_exist = false;
+  bool base_table_with_same_name_exists = false;
+
+  // First check which views exist
   for (Table_ref *view = views; view; view = view->next_local) {
     /*
       Either, the entity does not exist, in which case we will
@@ -1772,7 +1777,16 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
     const dd::Abstract_table *at = nullptr;
     if (thd->dd_client()->acquire(view->db, view->table_name, &at)) return true;
 
-    if (at == nullptr) {
+    view_does_not_exist = (at == nullptr);
+    base_table_with_same_name_exists =
+        (at && (at->type() == dd::enum_table_type::BASE_TABLE));
+
+    /*
+      If DROP ... IF EXISTS is specified, then reporting a warning will
+      suffice when the view does not exist or when a base table with the same
+      name exists. Otherwise, report an appropriate error.
+    */
+    if (view_does_not_exist) {
       String tbl_name(view->db, system_charset_info);
       tbl_name.append('.');
       tbl_name.append(String(view->table_name, system_charset_info));
@@ -1784,9 +1798,15 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
         if (non_existant_views.length()) non_existant_views.append(',');
         non_existant_views.append(tbl_name);
       }
-    } else if (at->type() == dd::enum_table_type::BASE_TABLE) {
-      my_error(ER_WRONG_OBJECT, MYF(0), view->db, view->table_name, "VIEW");
-      return true;
+    } else if (base_table_with_same_name_exists) {
+      if (thd->lex->drop_if_exists)
+        push_warning_printf(thd, Sql_condition::SL_NOTE, ER_WRONG_OBJECT,
+                            ER_THD(thd, ER_WRONG_OBJECT), view->db,
+                            view->table_name, "VIEW");
+      else {
+        my_error(ER_WRONG_OBJECT, MYF(0), view->db, view->table_name, "VIEW");
+        return true;
+      }
     }
   }
   if (non_existant_views.length()) {
@@ -1816,7 +1836,11 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
       return true;
     }
 
-    if (at == nullptr) {
+    view_does_not_exist = (at == nullptr);
+    base_table_with_same_name_exists =
+        (at && (at->type() == dd::enum_table_type::BASE_TABLE));
+
+    if (view_does_not_exist || base_table_with_same_name_exists) {
       assert(thd->lex->drop_if_exists);
       continue;  // Warning reported above.
     }
@@ -1933,7 +1957,7 @@ bool check_key_in_view(THD *thd, Table_ref *view, const Table_ref *table_ref) {
     */
     enum_mark_columns save_mark_used_columns = thd->mark_used_columns;
     thd->mark_used_columns = MARK_COLUMNS_NONE;
-    ulong want_privilege_saved = thd->want_privilege;
+    Access_bitmask want_privilege_saved = thd->want_privilege;
     thd->want_privilege = 0;
     for (Field_translator *fld = trans; fld < end_of_trans; fld++) {
       if (!fld->item->fixed && fld->item->fix_fields(thd, &fld->item))

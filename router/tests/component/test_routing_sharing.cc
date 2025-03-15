@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,8 +28,6 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-
-#define RAPIDJSON_HAS_STDSTRING 1
 
 #include "mysql/harness/net_ts/impl/socket.h"
 #include "rest_api_testutils.h"
@@ -563,7 +562,8 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_default) {
 
       const auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/set_option", "2")));
+                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                              ElementsAre("statement/sql/set_option", "2")));
     }
 
     {
@@ -588,7 +588,7 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_default) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                  ElementsAre(ElementsAre("statement/sql/select", "2"),
                               ElementsAre("statement/sql/set_option", "3")));
     }
   }
@@ -674,7 +674,8 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_zero) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/set_option", "2")));
+                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                              ElementsAre("statement/sql/set_option", "2")));
     }
 
     {
@@ -698,7 +699,7 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_zero) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                  ElementsAre(ElementsAre("statement/sql/select", "2"),
                               ElementsAre("statement/sql/set_option", "3")));
     }
   }
@@ -789,7 +790,8 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_small) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/set_option", "2")));
+                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                              ElementsAre("statement/sql/set_option", "2")));
     }
 
     // run it again.
@@ -804,7 +806,7 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_small) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                  ElementsAre(ElementsAre("statement/sql/select", "2"),
                               ElementsAre("statement/sql/set_option", "2")));
     }
 
@@ -831,7 +833,7 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_small) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/select", "2"),
+                  ElementsAre(ElementsAre("statement/sql/select", "3"),
                               ElementsAre("statement/sql/set_option", "3")));
     }
   }
@@ -881,7 +883,8 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_large) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/set_option", "1")));
+                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                              ElementsAre("statement/sql/set_option", "1")));
     }
 
     // run it again without waiting to be pooled.
@@ -896,7 +899,7 @@ TEST_F(RoutingSharingConfig, connection_sharing_delay_is_large) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                  ElementsAre(ElementsAre("statement/sql/select", "2"),
                               ElementsAre("statement/sql/set_option", "1")));
     }
   }
@@ -986,7 +989,8 @@ TEST_F(RoutingSharingConfig, connection_sharing_per_route) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/set_option", "2")));
+                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                              ElementsAre("statement/sql/set_option", "2")));
     }
 
     EXPECT_NO_ERROR(wait_for_idle_server_connections(1, 2s));
@@ -1003,7 +1007,7 @@ TEST_F(RoutingSharingConfig, connection_sharing_per_route) {
 
       auto result = results.front();
       EXPECT_THAT(result,
-                  ElementsAre(ElementsAre("statement/sql/select", "1"),
+                  ElementsAre(ElementsAre("statement/sql/select", "2"),
                               ElementsAre("statement/sql/set_option", "3")));
     }
   }

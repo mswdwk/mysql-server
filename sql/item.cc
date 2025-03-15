@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -76,6 +77,7 @@
 #include "sql/sql_class.h"    // THD
 #include "sql/sql_derived.h"  // Condition_pushdown
 #include "sql/sql_error.h"
+#include "sql/sql_executor.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_show.h"  // append_identifier
@@ -87,7 +89,6 @@
 #include "template_utils.h"
 #include "typelib.h"
 #include "unsafe_string_append.h"
-
 using std::max;
 using std::min;
 using std::string;
@@ -638,9 +639,11 @@ bool Item::itemize(Parse_context *pc, Item **res) {
     command => we should check pc->select on zero
   */
   if (pc->select) {
-    enum_parsing_context place = pc->select->parsing_place;
-    if (place == CTX_SELECT_LIST || place == CTX_HAVING)
+    const enum_parsing_context place = pc->select->parsing_place;
+    if (place == CTX_SELECT_LIST || place == CTX_HAVING ||
+        place == CTX_ORDER_BY) {
       pc->select->select_n_having_items++;
+    }
   }
   return false;
 }
@@ -960,13 +963,11 @@ bool Item_field::is_valid_for_pushdown(uchar *arg) {
     // does not print the original expression which leads to an incorrect clone.
     Query_expression *derived_query_expression =
         derived_table->derived_query_expression();
-    Item_result result_type = INVALID_RESULT;
+    Item_result result_type = this->result_type();
     for (Query_block *qb = derived_query_expression->first_query_block();
          qb != nullptr; qb = qb->next_query_block()) {
       Item *item = qb->get_derived_expr(field->field_index());
-      if (result_type == INVALID_RESULT) {
-        result_type = item->result_type();
-      } else if (result_type != item->result_type()) {
+      if (result_type != item->result_type()) {
         return true;
       }
       bool has_trigger_field = false;
@@ -1068,7 +1069,8 @@ Item *Item_field::replace_with_derived_expr(uchar *arg) {
   if (derived_table != table_ref) return this;
   Query_block *query_block = dti->m_derived_query_block;
   return query_block->clone_expression(
-      current_thd, query_block->get_derived_expr(field->field_index()));
+      current_thd, query_block->get_derived_expr(field->field_index()),
+      derived_table);
 }
 
 Item *Item_field::replace_with_derived_expr_ref(uchar *arg) {
@@ -1087,20 +1089,21 @@ Item *Item_field::replace_with_derived_expr_ref(uchar *arg) {
   // Get the expression in the derived table and find the right ref item to
   // point to.
   Item *select_item = query_block->get_derived_expr(field->field_index());
-  Item *new_ref = nullptr;
-  if (select_item) {
-    uint counter = 0;
-    enum_resolution_type resolution;
-    if (find_item_in_list(current_thd, select_item,
-                          query_block->get_fields_list(), &counter,
-                          REPORT_EXCEPT_NOT_FOUND, &resolution)) {
-      Item **replace_item = &query_block->base_ref_items[counter];
-      new_ref = new Item_ref(&query_block->context, replace_item, nullptr,
-                             nullptr, (*replace_item)->item_name.ptr(),
-                             resolution == RESOLVED_AGAINST_ALIAS);
-    }
+  Item **found;
+  uint counter;
+  enum_resolution_type resolution;
+  if (find_item_in_list(current_thd, select_item,
+                        query_block->get_fields_list(), &found, &counter,
+                        &resolution)) {
+    return nullptr;
   }
-  assert(new_ref);
+  // Next line is due to bug#35211828
+  if (found == nullptr) counter = 0;
+  Item **replace_item = &query_block->base_ref_items[counter];
+  Item *new_ref = new Item_ref(&query_block->context, replace_item, nullptr,
+                               nullptr, (*replace_item)->item_name.ptr(),
+                               resolution == RESOLVED_AGAINST_ALIAS);
+
   return new_ref;
 }
 
@@ -1144,9 +1147,9 @@ bool Item_field::check_function_as_value_generator(uchar *checker_args) {
     func_args->err_code =
         (func_args->source == VGS_GENERATED_COLUMN)
             ? ER_GENERATED_COLUMN_REF_AUTO_INC
-            : (func_args->source == VGS_DEFAULT_EXPRESSION)
-                  ? ER_DEFAULT_VAL_GENERATED_REF_AUTO_INC
-                  : ER_CHECK_CONSTRAINT_REFERS_AUTO_INCREMENT_COLUMN;
+        : (func_args->source == VGS_DEFAULT_EXPRESSION)
+            ? ER_DEFAULT_VAL_GENERATED_REF_AUTO_INC
+            : ER_CHECK_CONSTRAINT_REFERS_AUTO_INCREMENT_COLUMN;
     return true;
   }
 
@@ -1856,7 +1859,7 @@ void Item_splocal::print(const THD *thd, String *str, enum_query_type) const {
 }
 
 bool Item_splocal::set_value(THD *thd, sp_rcontext *ctx, Item **it) {
-  return ctx->set_variable(thd, get_var_idx(), it);
+  return ctx->set_variable(thd, false, get_var_idx(), it);
 }
 
 /*****************************************************************************
@@ -2212,6 +2215,8 @@ void Item::split_sum_func2(THD *thd, Ref_item_array ref_item_array,
   const bool is_sum_func = type() == SUM_FUNC_ITEM && !m_is_window_function;
   if ((!is_sum_func && has_aggregation() && !m_is_window_function) ||
       (!m_is_window_function && has_wf()) ||
+      (has_grouping_func() &&
+       !is_function_of_type(this, Item_func::GROUPING_FUNC)) ||
       (type() == FUNC_ITEM && ((down_cast<Item_func *>(this))->functype() ==
                                    Item_func::ISNOTNULLTEST_FUNC ||
                                (down_cast<Item_func *>(this))->functype() ==
@@ -2934,9 +2939,9 @@ const char *Item_ident::full_name() const {
       m_orig_field_name != nullptr ? m_orig_field_name : field_name;
   char *tmp;
   if (table_name == nullptr || f_name == nullptr)
-    return f_name != nullptr
-               ? f_name
-               : item_name.is_set() ? item_name.ptr() : "tmp_field";
+    return f_name != nullptr    ? f_name
+           : item_name.is_set() ? item_name.ptr()
+                                : "tmp_field";
   if (db_name && db_name[0]) {
     tmp = pointer_cast<char *>(
         (*THR_MALLOC)
@@ -2965,12 +2970,12 @@ void Item_ident::print(const THD *thd, String *str, enum_query_type query_type,
   if (lower_case_table_names == 1 ||
       // mode '2' does not apply to aliases:
       (lower_case_table_names == 2 && !alias_name_used())) {
-    if (table_name_arg && table_name_arg[0]) {
+    if (!(query_type & QT_NO_TABLE) && table_name_arg && table_name_arg[0]) {
       my_stpcpy(t_name_buff, table_name_arg);
       my_casedn_str(files_charset_info, t_name_buff);
       t_name = t_name_buff;
     }
-    if (db_name_arg && db_name_arg[0]) {
+    if (!(query_type & QT_NO_DB) && db_name_arg && db_name_arg[0]) {
       my_stpcpy(d_name_buff, db_name_arg);
       my_casedn_str(files_charset_info, d_name_buff);
       d_name = d_name_buff;
@@ -2978,9 +2983,9 @@ void Item_ident::print(const THD *thd, String *str, enum_query_type query_type,
   }
 
   if (table_name_arg == nullptr || f_name == nullptr || !f_name[0]) {
-    const char *nm = (f_name != nullptr && f_name[0])
-                         ? f_name
-                         : item_name.is_set() ? item_name.ptr() : "tmp_field";
+    const char *nm = (f_name != nullptr && f_name[0]) ? f_name
+                     : item_name.is_set()             ? item_name.ptr()
+                                                      : "tmp_field";
     append_identifier(thd, str, nm, strlen(nm));
     return;
   }
@@ -3946,11 +3951,10 @@ bool Item_param::set_str(const char *str, size_t length) {
     - when the source string is a binary string, keep it as-is and perform
       no conversion.
   */
-  set_collation_actual(collation_source() == &my_charset_bin
-                           ? &my_charset_bin
-                           : collation.collation != &my_charset_bin
-                                 ? collation.collation
-                                 : current_thd->variables.collation_connection);
+  set_collation_actual(collation_source() == &my_charset_bin ? &my_charset_bin
+                       : collation.collation != &my_charset_bin
+                           ? collation.collation
+                           : current_thd->variables.collation_connection);
 
   m_param_state = STRING_VALUE;
   return false;
@@ -4243,6 +4247,7 @@ String *Item_param::val_str(String *str) {
   assert(param_state() != NO_VALUE);
 
   if (param_state() == NULL_VALUE) {
+    null_value = true;
     return nullptr;
   }
   switch (data_type_actual()) {
@@ -4317,6 +4322,7 @@ void Item_param::copy_param_actual_type(Item_param *from) {
     default:
       break;
   }
+  sync_clones();
 }
 
 /**
@@ -5087,7 +5093,7 @@ static Item **find_field_in_group_list(Item *find_item, ORDER *group_list) {
 }
 
 /**
-  Resolve a column reference in a sub-select.
+  Resolve a column reference in a query block.
 
   Resolve a column reference (usually inside a HAVING clause) against the
   SELECT and GROUP BY clauses of the query described by 'select'. The name
@@ -5098,31 +5104,33 @@ static Item **find_field_in_group_list(Item *find_item, ORDER *group_list) {
   GROUP BY column is found, then a HAVING name is resolved as a possibly
   derived SELECT column.
 
-  @param thd     current thread
-  @param ref     column reference being resolved
-  @param select  the select that ref is resolved against
+  @param      thd     current thread
+  @param      ref     column reference being resolved
+  @param      select  the select that ref is resolved against
+  @param[out] found   pointer to the found item
+                       = nullptr: item was not found
 
   @note
     The resolution procedure is:
     - Search for a column or derived column named col_ref_i [in table T_j]
-    in the SELECT clause of Q.
+      in the SELECT clause of Q.
     - Search for a column named col_ref_i [in table T_j]
-    in the GROUP BY clause of Q.
+      in the GROUP BY clause of Q.
     - If found different columns with the same name in GROUP BY and SELECT,
-    issue a warning
+      issue a warning
     - return the found GROUP BY column if any,
     - else return the found SELECT column if any.
 
-
-  @return
-    - NULL - there was an error, and the error was already reported
-    - not_found_item - the item was not resolved, no error was reported
-    - resolved item - if the item was resolved
+  @returns false if success, true if error
+           In case of successful return, the value of "found" indicates
+           whether the column was found or not.
 */
 
-static Item **resolve_ref_in_select_and_group(THD *thd, Item_ident *ref,
-                                              Query_block *select) {
+static bool resolve_ref_in_select_and_group(THD *thd, Item_ident *ref,
+                                            Query_block *select,
+                                            Item ***found) {
   DBUG_TRACE;
+  *found = nullptr;
   Item **select_ref = nullptr;
   ORDER *group_list = select->group_list.first;
   uint counter;
@@ -5135,42 +5143,44 @@ static Item **resolve_ref_in_select_and_group(THD *thd, Item_ident *ref,
     array until we process all the ROW() values. So we should give up if
     base_ref_items is empty.
   */
-  if (select->base_ref_items.empty()) return not_found_item;
+  if (select->base_ref_items.empty()) return false;
 
   /*
     Search for a column or derived column named as 'ref' in the SELECT
-    clause of the current select.
+    clause of the current query block.
   */
-  if (!(select_ref =
-            find_item_in_list(thd, ref, select->get_fields_list(), &counter,
-                              REPORT_EXCEPT_NOT_FOUND, &resolution)))
-    return nullptr; /* Some error occurred. */
-  if (resolution == RESOLVED_AGAINST_ALIAS) ref->set_alias_of_expr();
-
+  if (find_item_in_list(thd, ref, select->get_fields_list(), &select_ref,
+                        &counter, &resolution)) {
+    return true; /* Some error occurred. */
+  }
+  if (select_ref != nullptr && resolution == RESOLVED_AGAINST_ALIAS) {
+    ref->set_alias_of_expr();
+  }
   /* If this is a non-aggregated field inside HAVING, search in GROUP BY. */
   if (select->having_fix_field && !ref->has_aggregation() && group_list) {
     Item **group_by_ref = find_field_in_group_list(ref, group_list);
 
     /* Check if the fields found in SELECT and GROUP BY are the same field. */
-    if (group_by_ref && (select_ref != not_found_item) &&
+    if (group_by_ref != nullptr && select_ref != nullptr &&
         !((*group_by_ref)->eq(*select_ref, false))) {
       push_warning_printf(thd, Sql_condition::SL_WARNING, ER_NON_UNIQ_ERROR,
                           ER_THD(thd, ER_NON_UNIQ_ERROR), ref->full_name(),
                           thd->where);
     }
 
-    if (group_by_ref != nullptr) return group_by_ref;
+    if (group_by_ref != nullptr) {
+      *found = group_by_ref;
+      return false;
+    }
   }
 
-  if (select_ref == not_found_item) return not_found_item;
+  if (select_ref == nullptr) return false;
 
-  if ((*select_ref)->has_wf()) {
-    /*
-      We can't reference an alias to a window function expr from within
-      a subquery or a HAVING clause
-    */
+  if ((*select_ref)->has_wf() && (thd->lex->deny_window_function(select))) {
+    // E.g. SELECT wf() AS x .. grouped-aggregate-function( ..x.. )
+    //      SELECT wf() AS x .., (SELECT ... x FROM..)
     my_error(ER_WINDOW_INVALID_WINDOW_FUNC_ALIAS_USE, MYF(0), ref->field_name);
-    return nullptr;
+    return true;
   }
 
   /*
@@ -5189,12 +5199,13 @@ static Item **resolve_ref_in_select_and_group(THD *thd, Item_ident *ref,
   if (select->base_ref_items[counter] == nullptr) {
     my_error(ER_ILLEGAL_REFERENCE, MYF(0), ref->item_name.ptr(),
              "forward reference in item list");
-    return nullptr;
+    return true;
   }
 
   assert((*select_ref)->fixed);
 
-  return &select->base_ref_items[counter];
+  *found = &select->base_ref_items[counter];
+  return false;
 }
 
 /**
@@ -5238,7 +5249,8 @@ static Item **resolve_ref_in_select_and_group(THD *thd, Item_ident *ref,
 
 int Item_field::fix_outer_field(THD *thd, Field **from_field,
                                 Item **reference) {
-  bool field_found = (*from_field != not_found_field);
+  const bool field_found =
+      (*from_field != nullptr) && (*from_field != not_found_field);
   bool upward_lookup = false;
 
   /*
@@ -5251,7 +5263,7 @@ int Item_field::fix_outer_field(THD *thd, Field **from_field,
     are searched starting from the innermost.
   */
   Name_resolution_context *last_checked_context = context;
-  Item **ref = not_found_item;
+  Item **ref = nullptr;
   Name_resolution_context *outer_context = context->outer_context;
   Query_block *select = nullptr;
   Query_expression *cur_query_expression = nullptr;
@@ -5445,9 +5457,10 @@ int Item_field::fix_outer_field(THD *thd, Field **from_field,
     /* Search in SELECT and GROUP lists of the outer select. */
     if (select_alias_referencable(place) &&
         outer_context->resolve_in_select_list) {
-      if (!(ref = resolve_ref_in_select_and_group(thd, this, select)))
+      if (resolve_ref_in_select_and_group(thd, this, select, &ref)) {
         return -1; /* Some error occurred (e.g. ambiguous names). */
-      if (ref != not_found_item) {
+      }
+      if (ref != nullptr) {
         // The item which we found is already fixed
         assert((*ref)->fixed);
         cur_query_expression->accumulate_used_tables((*ref)->used_tables());
@@ -5466,9 +5479,8 @@ int Item_field::fix_outer_field(THD *thd, Field **from_field,
   loop:;
   }
 
-  assert(ref != nullptr);
   if (!*from_field) return -1;
-  if (ref == not_found_item && *from_field == not_found_field) {
+  if (ref == nullptr && *from_field == not_found_field) {
     if (upward_lookup) {
       // We can't say exactly what absent table or field
       my_error(ER_BAD_FIELD_ERROR, MYF(0), full_name(), thd->where);
@@ -5480,7 +5492,7 @@ int Item_field::fix_outer_field(THD *thd, Field **from_field,
                            any_privileges ? 0 : thd->want_privilege, true);
     }
     return -1;
-  } else if (ref != not_found_item) {
+  } else if (ref != nullptr) {
     Item *save;
     Item_ref *rf;
 
@@ -5620,7 +5632,7 @@ bool is_null_on_empty_table(THD *thd, Item_field *i) {
            qsl->group_list.elements == 0;
   else
     return (sl->resolve_place == Query_block::RESOLVE_SELECT_LIST ||
-            (thd->lex->using_hypergraph_optimizer && sl->is_ordered())) &&
+            (thd->lex->using_hypergraph_optimizer() && sl->is_ordered())) &&
            sl->with_sum_func && sl->group_list.elements == 0 &&
            thd->lex->in_sum_func == nullptr;
 }
@@ -5671,21 +5683,19 @@ bool is_null_on_empty_table(THD *thd, Item_field *i) {
   @param[in,out] reference  view column if this item was resolved to a
     view column
 
-  @retval
-    true  if error
-  @retval
-    false on success
+  @returns false on success, true on error
 */
 
 bool Item_field::fix_fields(THD *thd, Item **reference) {
-  assert(fixed == 0);
+  assert(!fixed);
   Field *from_field = not_found_field;
   bool outer_fixed = false;
+  Query_block *qb = thd->lex->current_query_block();
 
   Internal_error_handler_holder<View_error_handler, Table_ref> view_handler(
       thd, context->view_error_handler, context->view_error_handler_arg);
 
-  if (table_ref) {
+  if (table_ref != nullptr) {
     // This is a cloned field (used during condition pushdown to derived
     // tables). It has table reference and the field too. Make a call to
     // set_field() to ensure everything else gets set correctly.
@@ -5700,176 +5710,164 @@ bool Item_field::fix_fields(THD *thd, Item **reference) {
     table_ref = orig_table_ref;
     return false;
   }
-  if (!field)  // If field is not checked
-  {
-    /*
-      In case of view, find_field_in_tables() write pointer to view field
-      expression to 'reference', i.e. it substitute that expression instead
-      of this Item_field
-    */
-    from_field = find_field_in_tables(
-        thd, this, context->first_name_resolution_table,
-        context->last_name_resolution_table, reference,
-        thd->lex->use_only_table_context ? REPORT_ALL_ERRORS
-                                         : IGNORE_EXCEPT_NON_UNIQUE,
-        any_privileges ? 0 : thd->want_privilege, true);
-    if (thd->is_error()) goto error;
-    if (from_field == not_found_field) {
-      int ret;
-      /* Look up in current select's item_list to find aliased fields */
-      if (thd->lex->current_query_block()->is_item_list_lookup) {
-        uint counter;
-        enum_resolution_type resolution;
-        Item **res = find_item_in_list(
-            thd, this, &thd->lex->current_query_block()->fields, &counter,
-            REPORT_EXCEPT_NOT_FOUND, &resolution);
-        if (!res) return true;
-        if (resolution == RESOLVED_AGAINST_ALIAS) set_alias_of_expr();
-        if (res != not_found_item) {
-          if ((*res)->type() == Item::FIELD_ITEM) {
-            /*
-              It's an Item_field referencing another Item_field in the select
-              list.
-              Use the field from the Item_field in the select list and leave
-              the Item_field instance in place.
-            */
+  assert(field == nullptr);
+  /*
+    In case of view, find_field_in_tables() write pointer to view field
+    expression to 'reference', i.e. it substitute that expression instead
+    of this Item_field
+  */
+  from_field = find_field_in_tables(
+      thd, this, context->first_name_resolution_table,
+      context->last_name_resolution_table, reference,
+      thd->lex->use_only_table_context ? REPORT_ALL_ERRORS
+                                       : IGNORE_EXCEPT_NON_UNIQUE,
+      any_privileges ? 0 : thd->want_privilege, true);
+  if (thd->is_error()) return true;
+  if (from_field == not_found_field || from_field == nullptr) {
+    int ret;
+    // Check current query block's item_list for aliased fields
+    if (qb->is_item_list_lookup) {
+      uint counter;
+      enum_resolution_type resolution;
+      Item **res;
+      if (find_item_in_list(thd, this, &qb->fields, &res, &counter,
+                            &resolution)) {
+        return true;
+      }
+      if (resolution == RESOLVED_AGAINST_ALIAS) set_alias_of_expr();
+      if (res != nullptr) {
+        if ((*res)->type() == Item::FIELD_ITEM) {
+          /*
+            It's an Item_field referencing another Item_field in the select
+            list.
+            Use the field from the Item_field in the select list and leave
+            the Item_field instance in place.
+          */
 
-            Item_field *const item_field = (Item_field *)(*res);
-            Field *const new_field = item_field->field;
+          Item_field *const item_field = (Item_field *)(*res);
+          Field *const new_field = item_field->field;
 
-            if (new_field == nullptr) {
-              /* The column to which we link isn't valid. */
-              my_error(ER_BAD_FIELD_ERROR, MYF(0), item_field->item_name.ptr(),
-                       thd->where);
+          if (new_field == nullptr) {
+            /* The column to which we link isn't valid. */
+            my_error(ER_BAD_FIELD_ERROR, MYF(0), item_field->item_name.ptr(),
+                     thd->where);
+            return true;
+          }
+
+          set_field(new_field);
+
+          cached_table = table_ref;
+
+          // The found column may be an outer reference
+          if (item_field->depended_from)
+            mark_as_dependent(thd, item_field->depended_from,
+                              context->query_block, this, this);
+
+          return false;
+        } else {
+          /*
+            It's not an Item_field in the select list so we must make a new
+            Item_ref to point to the Item in the select list and replace the
+            Item_field created by the parser with the new Item_ref.
+            Ex: SELECT func1(col) as c ... ORDER BY func2(c);
+            NOTE: If we are fixing an alias reference inside ORDER/GROUP BY
+            item tree, then we use new Item_ref as an
+            intermediate value to resolve referenced item only.
+            In this case the new Item_ref item is unused.
+          */
+          if (resolution == RESOLVED_AGAINST_ALIAS) {
+            res = &qb->base_ref_items[counter];
+
+            if ((*res)->has_wf() && thd->lex->deny_window_function(qb)) {
+              // SELECT wf() AS x .. ORDER BY grouped-aggregate-function(..x..)
+              my_error(ER_WINDOW_INVALID_WINDOW_FUNC_ALIAS_USE, MYF(0),
+                       field_name);
               return true;
             }
-
-            set_field(new_field);
-
-            cached_table = table_ref;
-
-            // The found column may be an outer reference
-            if (item_field->depended_from)
-              mark_as_dependent(thd, item_field->depended_from,
-                                context->query_block, this, this);
-
-            return false;
-          } else {
-            /*
-              It's not an Item_field in the select list so we must make a new
-              Item_ref to point to the Item in the select list and replace the
-              Item_field created by the parser with the new Item_ref.
-              Ex: SELECT func1(col) as c ... ORDER BY func2(c);
-              NOTE: If we are fixing an alias reference inside ORDER/GROUP BY
-              item tree, then we use new Item_ref as an
-              intermediate value to resolve referenced item only.
-              In this case the new Item_ref item is unused.
-            */
-            if (resolution == RESOLVED_AGAINST_ALIAS)
-              res = &thd->lex->current_query_block()->base_ref_items[counter];
-
-            Item_ref *rf =
-                new Item_ref(context, res, db_name, table_name, field_name,
-                             resolution == RESOLVED_AGAINST_ALIAS);
-            if (rf == nullptr) return true;
-
-            if (!rf->fixed) {
-              // No need for recursive resolving of aliases.
-              const bool group_fix_field =
-                  thd->lex->current_query_block()->group_fix_field;
-              thd->lex->current_query_block()->group_fix_field = false;
-              bool fix_error =
-                  rf->fix_fields(thd, (Item **)&rf) || rf->check_cols(1);
-              thd->lex->current_query_block()->group_fix_field =
-                  group_fix_field;
-              if (fix_error) return true;
-            }
-            *reference = rf;
-            // WL#6570 remove-after-qa
-            assert(thd->stmt_arena->is_regular() ||
-                   !thd->lex->is_exec_started());
-
-            return false;
           }
+
+          Item_ref *rf =
+              new Item_ref(context, res, db_name, table_name, field_name,
+                           resolution == RESOLVED_AGAINST_ALIAS);
+          if (rf == nullptr) return true;
+
+          if (!rf->fixed) {
+            // No need for recursive resolving of aliases.
+            const bool group_fix_field = qb->group_fix_field;
+            qb->group_fix_field = false;
+            if (rf->fix_fields(thd, (Item **)&rf) || rf->check_cols(1))
+              return true;
+            qb->group_fix_field = group_fix_field;
+          }
+          *reference = rf;
+          // WL#6570 remove-after-qa
+          assert(thd->stmt_arena->is_regular() || !thd->lex->is_exec_started());
+
+          return false;
         }
       }
-      if ((ret = fix_outer_field(thd, &from_field, reference)) < 0) goto error;
-      outer_fixed = true;
-      if (!ret) return false;
-    } else if (!from_field)
-      goto error;
-
-    /*
-      We should resolve this as an outer field reference if
-      1. we haven't done it before, and
-      2. the query_block of the table that contains this field is
-         different from the query_block of the current name resolution
-         context.
-     */
-    if (!outer_fixed &&  // 1
-        cached_table && cached_table->query_block &&
-        context->query_block &&  // 2
-        cached_table->query_block != context->query_block) {
-      int ret;
-      if ((ret = fix_outer_field(thd, &from_field, reference)) < 0) goto error;
-      outer_fixed = true;
-      if (!ret) return false;
     }
-
-    /*
-      If inside an aggregation function, set the correct aggregation level.
-      Even if a view reference is found, the level is still the query block
-      associated with the context of the current item:
-    */
-    assert(from_field != view_ref_found ||
-           context->query_block ==
-               dynamic_cast<Item_ident *>(*reference)->context->query_block);
-    if (thd->lex->in_sum_func &&
-        thd->lex->in_sum_func->base_query_block->nest_level ==
-            context->query_block->nest_level)
-      thd->lex->in_sum_func->max_aggr_level =
-          max(thd->lex->in_sum_func->max_aggr_level,
-              int8(context->query_block->nest_level));
-
-    // If view column reference, Item in *reference is completely resolved:
-    if (from_field == view_ref_found) {
-      if (is_null_on_empty_table(thd, this)) {
-        (*reference)->set_nullable(true);
-        if ((*reference)->real_item()->type() == Item::FIELD_ITEM) {
-          // See below for explanation.
-          TABLE *table =
-              down_cast<Item_field *>((*reference)->real_item())->field->table;
-          table->set_nullable();
-        }
-      }
-      return false;
-    }
-
-    if (from_field->is_hidden_by_system()) {
-      /*
-        This field is either hidden by the storage engine or SQL layer. In
-        either case, report column "not found" error.
-      */
-      my_error(ER_BAD_FIELD_ERROR, MYF(0), from_field->field_name, thd->where);
-      return true;
-    }
-
-    // Not view reference, not outer reference; need to set properties:
-    set_field(from_field);
-  } else if (thd->mark_used_columns != MARK_COLUMNS_NONE) {
-    TABLE *table = field->table;
-    MY_BITMAP *current_bitmap;
-    MY_BITMAP *other_bitmap [[maybe_unused]];
-    if (thd->mark_used_columns == MARK_COLUMNS_READ) {
-      current_bitmap = table->read_set;
-      other_bitmap = table->write_set;
-    } else {
-      current_bitmap = table->write_set;
-      other_bitmap = table->read_set;
-    }
-    if (!bitmap_test_and_set(current_bitmap, field->field_index()))
-      assert(bitmap_is_set(other_bitmap, field->field_index()));
+    if ((ret = fix_outer_field(thd, &from_field, reference)) < 0) return true;
+    outer_fixed = true;
+    if (!ret) return false;
   }
+  /*
+    We should resolve this as an outer field reference if
+    1. we haven't done it before, and
+    2. the query_block of the table that contains this field is
+       different from the query_block of the current name resolution
+       context.
+   */
+  if (!outer_fixed &&                                                       // 1
+      cached_table && cached_table->query_block && context->query_block &&  // 2
+      cached_table->query_block != context->query_block) {
+    int ret;
+    if ((ret = fix_outer_field(thd, &from_field, reference)) < 0) return true;
+    outer_fixed = true;
+    if (!ret) return false;
+  }
+
+  /*
+    If inside an aggregation function, set the correct aggregation level.
+    Even if a view reference is found, the level is still the query block
+    associated with the context of the current item:
+  */
+  assert(from_field != view_ref_found ||
+         context->query_block ==
+             dynamic_cast<Item_ident *>(*reference)->context->query_block);
+  if (thd->lex->in_sum_func &&
+      thd->lex->in_sum_func->base_query_block->nest_level ==
+          context->query_block->nest_level)
+    thd->lex->in_sum_func->max_aggr_level =
+        max(thd->lex->in_sum_func->max_aggr_level,
+            int8(context->query_block->nest_level));
+
+  // If view column reference, Item in *reference is completely resolved:
+  if (from_field == view_ref_found) {
+    if (is_null_on_empty_table(thd, this)) {
+      (*reference)->set_nullable(true);
+      if ((*reference)->real_item()->type() == Item::FIELD_ITEM) {
+        // See below for explanation.
+        TABLE *table =
+            down_cast<Item_field *>((*reference)->real_item())->field->table;
+        table->set_nullable();
+      }
+    }
+    return false;
+  }
+
+  if (from_field->is_hidden_by_system()) {
+    /*
+      This field is either hidden by the storage engine or SQL layer. In
+      either case, report column "not found" error.
+    */
+    my_error(ER_BAD_FIELD_ERROR, MYF(0), from_field->field_name, thd->where);
+    return true;
+  }
+
+  // Not view reference, not outer reference; need to set properties:
+  set_field(from_field);
+
   if (any_privileges) {
     const char *db, *tab;
     db = cached_table->get_db_name();
@@ -5881,7 +5879,7 @@ bool Item_field::fix_fields(THD *thd, Item **reference) {
       my_error(ER_COLUMNACCESS_DENIED_ERROR, MYF(0), "ANY",
                thd->security_context()->priv_user().str,
                thd->security_context()->host_or_ip().str, field_name, tab);
-      goto error;
+      return true;
     }
   }
   fixed = true;
@@ -5896,9 +5894,6 @@ bool Item_field::fix_fields(THD *thd, Item **reference) {
     field->table->set_nullable();
   }
   return false;
-
-error:
-  return true;
 }
 
 void Item_field::bind_fields() {
@@ -6145,7 +6140,57 @@ Item *Item_field::equal_fields_propagator(uchar *arg) {
 Item *Item_field::replace_item_field(uchar *arg) {
   auto *info = pointer_cast<Item::Item_field_replacement *>(arg);
 
-  if (field == info->m_target) {
+  if (field == info->m_target &&
+      info->m_default_value !=
+          Item::Item_field_replacement::Mode::DEFAULT_VALUE) {
+    if (info->m_curr_block == info->m_trans_block) return info->m_item;
+
+    // The field is an outer reference, so we cannot reuse transformed query
+    // block's Item_field; make a new one for this query block
+    THD *const thd = current_thd;
+    Item_field *outer_field = new (thd->mem_root) Item_field(thd, info->m_item);
+    if (outer_field == nullptr) return nullptr; /* purecov: inspected */
+    outer_field->depended_from = info->m_trans_block;
+    outer_field->context = &info->m_curr_block->context;
+    return outer_field;
+  }
+
+  return this;
+}
+
+bool Item_default_value::collect_item_field_or_view_ref_processor(uchar *argp) {
+  Collect_item_fields_or_view_refs *info =
+      pointer_cast<Collect_item_fields_or_view_refs *>(argp);
+  if (info->is_stopped(this)) return false;
+
+  List_iterator<Item> item_list_it(*info->m_item_fields_or_view_refs);
+  Item *curr_item;
+  while ((curr_item = item_list_it++)) {
+    if (this->eq(curr_item, true)) return false; /* Already in the set. */
+  }
+  info->m_item_fields_or_view_refs->push_back(this);
+  return false;
+}
+
+/**
+  If this default value is the target of replacement, replace it
+  with the info object's item or, if the item is found inside a subquery, the
+  target is an outer reference, so we create a new \c Item_field, mark it
+  accordingly and replace with that instead.
+
+  @param argp  An info object of type Item::Item_field_replacement.
+  @returns the resulting item, replaced or not, or nullptr if error
+*/
+
+Item *Item_default_value::replace_item_field(uchar *argp) {
+  auto *info = pointer_cast<Item::Item_field_replacement *>(argp);
+  if (info->m_default_value == Item::Item_field_replacement::Mode::CONFLATE)
+    return Item_field::Item::replace_item_field(argp);
+
+  Item_field *f = down_cast<Item_field *>(this->arg->real_item());
+  if (f->field == info->m_target &&
+      info->m_default_value ==
+          Item::Item_field_replacement::Mode::DEFAULT_VALUE) {
     if (info->m_curr_block == info->m_trans_block) return info->m_item;
 
     // The field is an outer reference, so we cannot reuse transformed query
@@ -6506,7 +6551,6 @@ void Item_field::make_field(Send_field *tmp_field) {
  */
 static inline type_conversion_status field_conv_with_cache(
     Field *to, Field *from, Field **last_to, uint32_t *to_is_memcpyable) {
-  assert(to->field_ptr() != from->field_ptr());
   if (to != *last_to) {
     *last_to = to;
     if (fields_are_memcpyable(to, from)) {
@@ -6515,8 +6559,17 @@ static inline type_conversion_status field_conv_with_cache(
       *to_is_memcpyable = -1;
     }
   }
-  if (*to_is_memcpyable != static_cast<uint32_t>(-1)) {
-    memcpy(to->field_ptr(), from->field_ptr(), *to_is_memcpyable);
+  if (*to_is_memcpyable != static_cast<uint32_t>(-1) &&
+      *to_is_memcpyable == to->pack_length() && from->type() == to->type() &&
+      (from->type() != MYSQL_TYPE_NEWDECIMAL ||
+       from->decimals() == to->decimals())) {
+    const size_t length = *to_is_memcpyable;
+    // Check that we're not memcpying from the source string into itself, since
+    // that invokes undefined behaviour. Two adjacent fields could have the same
+    // position in the record buffer if one of them has zero length (such as
+    // CHAR(0)). This is not a problem, since memcpy is a no-op in that case.
+    assert(to->field_ptr() != from->field_ptr() || length == 0);
+    memcpy(to->field_ptr(), from->field_ptr(), length);
     return TYPE_OK;
   } else {
     return field_conv_slow(to, from);
@@ -6974,9 +7027,9 @@ bool Item_float::eq(const Item *arg, bool) const {
 }
 
 inline uint char_val(char X) {
-  return (uint)(X >= '0' && X <= '9'
-                    ? X - '0'
-                    : X >= 'A' && X <= 'Z' ? X - 'A' + 10 : X - 'a' + 10);
+  return (uint)(X >= '0' && X <= '9'   ? X - '0'
+                : X >= 'A' && X <= 'Z' ? X - 'A' + 10
+                                       : X - 'a' + 10);
 }
 
 Item_hex_string::Item_hex_string() { hex_string_init("", 0); }
@@ -7128,6 +7181,13 @@ void Item_hex_string::print(const THD *, String *str,
   }
   const uchar *ptr = pointer_cast<const uchar *>(str_value.ptr());
   const uchar *end = ptr + str_value.length();
+  // If it is an empty string, print X''. Printing "0x" makes it not
+  // parse correctly when this printed string is re-used to parse
+  // this expression.
+  if (ptr == end) {
+    str->append("X''");
+    return;
+  }
   str->append("0x");
   for (; ptr != end; ptr++) {
     str->append(_dig_vec_lower[*ptr >> 4]);
@@ -7351,6 +7411,7 @@ bool Item::send(Protocol *protocol, String *buffer) {
   }
 
   assert(null_value);
+  if (current_thd->is_error()) return true;
   return protocol->store_null();
 }
 
@@ -7509,6 +7570,19 @@ bool Item::cache_const_expr_analyzer(uchar **arg) {
     An item above in the tree is to be cached, so need to cache the present
     item, and no need to go down the tree.
   */
+  return false;
+}
+
+bool Item::clean_up_after_removal(uchar *arg) {
+  Cleanup_after_removal_context *const ctx =
+      pointer_cast<Cleanup_after_removal_context *>(arg);
+
+  if (ctx->is_stopped(this)) return false;
+
+  if (reference_count() > 1) {
+    (void)decrement_ref_count();
+    ctx->stop_at(this);
+  }
   return false;
 }
 
@@ -7927,15 +8001,18 @@ bool Item_ref::clean_up_after_removal(uchar *arg) {
 
   if (ctx->is_stopped(this)) return false;
 
-  // Exit if second visit to this object:
-  if (m_unlinked) return false;
+  // Decrement reference count for referencing object before
+  // referenced object:
+  if (reference_count() > 1) {
+    (void)decrement_ref_count();
+    ctx->stop_at(this);
+    return false;
+  }
+  if (ref_item()->is_abandoned()) return false;
 
   if (ref_item()->decrement_ref_count() > 0) {
     ctx->stop_at(this);
   }
-
-  // Ensure the count is not decremented twice:
-  m_unlinked = true;
 
   return false;
 }
@@ -8008,14 +8085,13 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
   Internal_error_handler_holder<View_error_handler, Table_ref> view_handler(
       thd, context->view_error_handler, context->view_error_handler_arg);
 
-  if (m_ref_item == nullptr || m_ref_item == not_found_item) {
+  if (m_ref_item == nullptr) {
     assert(context->query_block == thd->lex->current_query_block());
-    m_ref_item =
-        resolve_ref_in_select_and_group(thd, this, context->query_block);
-    if (m_ref_item == nullptr) {
-      goto error; /* Some error occurred (e.g. ambiguous names). */
+    if (resolve_ref_in_select_and_group(thd, this, context->query_block,
+                                        &m_ref_item)) {
+      return true;  // Some error occurred (e.g. ambiguous names).
     }
-    if (m_ref_item == not_found_item) /* This reference was not resolved. */
+    if (m_ref_item == nullptr) /* This reference was not resolved. */
     {
       Name_resolution_context *last_checked_context = context;
       Name_resolution_context *outer_context = context->outer_context;
@@ -8024,7 +8100,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
       if (outer_context == nullptr) {
         /* The current reference cannot be resolved in this query. */
         my_error(ER_BAD_FIELD_ERROR, MYF(0), this->full_name(), thd->where);
-        goto error;
+        return true;
       }
 
       /*
@@ -8063,11 +8139,10 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
         /* Search in the SELECT and GROUP lists of the outer select. */
         if (select_alias_referencable(place) &&
             outer_context->resolve_in_select_list) {
-          m_ref_item = resolve_ref_in_select_and_group(thd, this, select);
-          if (m_ref_item == nullptr) {
-            goto error; /* Some error occurred (e.g. ambiguous names). */
+          if (resolve_ref_in_select_and_group(thd, this, select, &m_ref_item)) {
+            return true;  // Some error occurred (e.g. ambiguous names).
           }
-          if (m_ref_item != not_found_item) {
+          if (m_ref_item != nullptr) {
             assert(ref_item()->fixed);
             cur_query_expression->accumulate_used_tables(
                 ref_item()->used_tables());
@@ -8078,6 +8153,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
             this item with another item and still use this item in some
             other place of the parse tree.
           */
+          assert(m_ref_item == nullptr);
           m_ref_item = nullptr;
         }
 
@@ -8097,15 +8173,15 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
             (!select->with_sum_func && select->group_list.elements == 0 &&
              !select->is_distinct())) {
           /*
-            In case of view, find_field_in_tables() write pointer to view
-            field expression to 'reference', i.e. it substitute that
+            In case of view, find_field_in_tables() writes pointer to view
+            field expression to 'reference', i.e. it substitutes that
             expression instead of this Item_ref
           */
           from_field = find_field_in_tables(
               thd, this, outer_context->first_name_resolution_table,
               outer_context->last_name_resolution_table, reference,
               IGNORE_EXCEPT_NON_UNIQUE, thd->want_privilege, true);
-          if (from_field == nullptr) goto error;
+          if (from_field == nullptr) return true;
           if (from_field == view_ref_found) {
             Item::Type refer_type = (*reference)->type();
             cur_query_expression->accumulate_used_tables(
@@ -8164,7 +8240,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
           Prepared_stmt_arena_holder ps_arena_holder(thd);
           fld = new Item_field(
               thd, context, from_field->table->pos_in_table_list, from_field);
-          if (fld == nullptr) goto error;
+          if (fld == nullptr) return true;
         }
 
         *reference = fld;
@@ -8188,7 +8264,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
       if (m_ref_item == nullptr) {
         /* The item was not a table field and not a reference */
         my_error(ER_BAD_FIELD_ERROR, MYF(0), this->full_name(), thd->where);
-        goto error;
+        return true;
       }
       /* Should be checked in resolve_ref_in_select_and_group(). */
       assert(ref_item()->fixed);
@@ -8232,16 +8308,13 @@ bool Item_ref::fix_fields(THD *thd, Item **reference) {
            enum_walk::SUBQUERY_POSTFIX, nullptr)) {
     my_error(ER_ILLEGAL_REFERENCE, MYF(0), full_name(),
              "reference to group function");
-    goto error;
+    return true;
   }
 
   set_properties();
 
-  if (ref_item()->check_cols(1)) goto error;
+  if (ref_item()->check_cols(1)) return true;
   return false;
-
-error:
-  return true;
 }
 
 void Item_ref::set_properties() {
@@ -8332,7 +8405,7 @@ void Item_ref::print(const THD *thd, String *str,
   if (m_ref_item == nullptr)  // Unresolved reference: print reference
     return Item_ident::print(thd, str, query_type);
 
-  if (!const_item() && m_alias_of_expr &&
+  if (!thd->lex->reparse_derived_table_condition && m_alias_of_expr &&
       ref_item()->type() != Item::CACHE_ITEM && ref_type() != VIEW_REF &&
       table_name == nullptr && item_name.ptr()) {
     Simple_cstring str1 = ref_item()->real_item()->item_name;
@@ -8783,7 +8856,7 @@ Item *Item_view_ref::replace_view_refs_with_clone(uchar *arg) {
   // block, the context to resolve the field will be different than
   // the derived table context (dt1).
   return dti->m_derived_query_block->outer_query_block()->clone_expression(
-      current_thd, ref_item());
+      current_thd, ref_item(), dti->m_derived_table);
 }
 
 bool Item_default_value::itemize(Parse_context *pc, Item **res) {
@@ -9103,8 +9176,8 @@ bool Item_trigger_field::eq(const Item *item, bool) const {
              down_cast<const Item_trigger_field *>(item)->field_name);
 }
 
-bool Item_trigger_field::set_value(THD *thd, sp_rcontext * /*ctx*/, Item **it) {
-  Item *item = sp_prepare_func_item(thd, it);
+bool Item_trigger_field::set_value(THD *thd, sp_rcontext *, Item **it) {
+  Item *item = sp_prepare_func_item(thd, true, it);
   if (item == nullptr) return true;
 
   if (!fixed) {
@@ -9787,7 +9860,7 @@ longlong Item_cache_datetime::val_int() { return val_int_from_decimal(); }
 
 Item_cache_json::Item_cache_json()
     : Item_cache(MYSQL_TYPE_JSON),
-      m_value(new (*THR_MALLOC) Json_wrapper()),
+      m_value(new(*THR_MALLOC) Json_wrapper()),
       m_is_sorted(false) {}
 
 Item_cache_json::~Item_cache_json() { destroy(m_value); }
@@ -10538,16 +10611,14 @@ longlong Item_values_column::val_int() {
   return tmp;
 }
 
-/* purecov: begin deadcode */
-
 my_decimal *Item_values_column::val_decimal(my_decimal *decimal_value) {
-  assert(false);
   assert(fixed);
   my_decimal *val = m_value_ref->val_decimal(decimal_value);
   null_value = m_value_ref->null_value;
   return val;
 }
 
+/* purecov: begin deadcode */
 bool Item_values_column::val_bool() {
   assert(false);
   assert(fixed);
@@ -10563,7 +10634,6 @@ bool Item_values_column::val_json(Json_wrapper *result) {
   null_value = m_value_ref->null_value;
   return ok;
 }
-
 /* purecov: end */
 
 String *Item_values_column::val_str(String *tmp) {
@@ -10719,10 +10789,12 @@ bool Item_ident::aggregate_check_distinct(uchar *arg) {
   */
   uint counter;
   enum_resolution_type resolution;
-  Item **const res = find_item_in_list(current_thd, this, &sl->fields, &counter,
-                                       REPORT_EXCEPT_NOT_FOUND, &resolution);
-
-  if (res == not_found_item) {
+  Item **res;
+  if (find_item_in_list(current_thd, this, &sl->fields, &res, &counter,
+                        &resolution)) {
+    return true;
+  }
+  if (res == nullptr) {
     /*
       Point (3) of Distinct_check::check_query() is true: column is
       not in SELECT list.
@@ -10853,29 +10925,31 @@ bool Item_asterisk::itemize(Parse_context *pc, Item **res) {
   return false;
 }
 
-bool ItemsAreEqual(const Item *a, const Item *b, bool binary_cmp) {
-  const Item *real_a = a->real_item();
-  const Item *real_b = b->real_item();
+/**
+  Unwrap an Item argument so that Item::eq() can see the "real" item, and not
+  just the wrapper. It unwraps Item_ref using real_item(), and also cache items
+  and rollup group wrappers, since these may not have been added consistently to
+  both sides compared by Item::eq().
+ */
+static const Item *UnwrapArgForEq(const Item *item) {
+  const Item *prev_item;
+  do {
+    prev_item = item;
+    item = item->real_item();
 
-  // Unwrap caches, as they may not be added consistently
-  // to both sides.
-  if (real_a->type() == Item::CACHE_ITEM) {
-    real_a = down_cast<const Item_cache *>(real_a)->get_example();
-  }
-  if (real_b->type() == Item::CACHE_ITEM) {
-    real_b = down_cast<const Item_cache *>(real_b)->get_example();
-  }
-  if (real_a->type() == Item::FUNC_ITEM &&
-      down_cast<const Item_func *>(real_a)->functype() ==
-          Item_func::ROLLUP_GROUP_ITEM_FUNC) {
-    real_a = down_cast<const Item_rollup_group_item *>(real_a)->inner_item();
-  }
-  if (real_b->type() == Item::FUNC_ITEM &&
-      down_cast<const Item_func *>(real_b)->functype() ==
-          Item_func::ROLLUP_GROUP_ITEM_FUNC) {
-    real_b = down_cast<const Item_rollup_group_item *>(real_b)->inner_item();
-  }
-  return real_a->eq(real_b, binary_cmp);
+    if (item->type() == Item::CACHE_ITEM) {
+      item = down_cast<const Item_cache *>(item)->get_example();
+    }
+
+    if (is_rollup_group_wrapper(item)) {
+      item = down_cast<const Item_rollup_group_item *>(item)->inner_item();
+    }
+  } while (item != prev_item);  // Keep trying till no wrapper is found.
+  return item;
+}
+
+bool ItemsAreEqual(const Item *a, const Item *b, bool binary_cmp) {
+  return UnwrapArgForEq(a)->eq(UnwrapArgForEq(b), binary_cmp);
 }
 
 bool AllItemsAreEqual(const Item *const *a, const Item *const *b, int num_items,

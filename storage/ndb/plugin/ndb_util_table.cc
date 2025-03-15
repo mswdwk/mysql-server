@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -41,6 +42,7 @@
 #include "storage/ndb/plugin/ndb_local_connection.h"
 #include "storage/ndb/plugin/ndb_log.h"
 #include "storage/ndb/plugin/ndb_ndbapi_util.h"
+#include "storage/ndb/plugin/ndb_require.h"
 #include "storage/ndb/plugin/ndb_schema_trans_guard.h"
 #include "storage/ndb/plugin/ndb_tdc.h"
 #include "storage/ndb/plugin/ndb_thd_ndb.h"
@@ -568,7 +570,7 @@ bool Util_table_creator::create_or_upgrade_in_NDB(bool upgrade_allowed,
 
   } else {
     // Table did not exist. Create it.
-    ndb_log_verbose(50, "The '%s' table does not exist, creating..",
+    ndb_log_verbose(50, "The '%s' table does not exist, creating...",
                     m_name.c_str());
 
     // Create the table using NdbApi
@@ -578,7 +580,7 @@ bool Util_table_creator::create_or_upgrade_in_NDB(bool upgrade_allowed,
     }
     reinstall = true;
 
-    ndb_log_info("Created '%s' table in NdbDictionary", m_name.c_str());
+    ndb_log_info("Created '%s' table in NDB", m_name.c_str());
   }
 
   ndb_log_verbose(50, "The '%s' table is ok in NDB", m_name.c_str());
@@ -588,7 +590,7 @@ bool Util_table_creator::create_or_upgrade_in_NDB(bool upgrade_allowed,
 bool Util_table_creator::install_in_DD(bool reinstall) {
   DBUG_TRACE;
 
-  ndb_log_verbose(50, "Checking '%s' table in Data Dictionary", m_name.c_str());
+  ndb_log_verbose(50, "Checking '%s' table in DD", m_name.c_str());
 
   Ndb_dd_client dd_client(m_thd);
 
@@ -600,26 +602,20 @@ bool Util_table_creator::install_in_DD(bool reinstall) {
   // There may exist a stale DD definition, occupying the NDB table id
   // or the pair schema.table. Check these and remove.
   const NdbDictionary::Table *ndbtab = m_util_table.get_table();
-  const dd::Table *existing;
-
   const Ndb_dd_handle ndb_handle{ndbtab->getObjectId(),
                                  ndbtab->getObjectVersion()};
-  if (!ndb_handle.valid()) {
-    ndb_log_error("Invalid id from '%s' table", m_name.c_str());
-    assert(false);
-  }
-  ndb_log_verbose(50, "Handle NDB %s", ndb_handle.to_string().c_str());
+  ndbcluster::ndbrequire(ndb_handle.valid());
 
+  const dd::Table *existing = nullptr;
   if (!dd_client.get_table(db_name(), table_name(), &existing)) {
     ndb_log_error("Failed to get '%s' table from DD", m_name.c_str());
     return false;
   }
 
-  if (existing) {
+  if (existing != nullptr) {
     const Ndb_dd_handle dd_handle = ndb_dd_table_get_spi_and_version(existing);
-    ndb_log_verbose(50, "Handle DD %s", dd_handle.to_string().c_str());
     if (!dd_handle.valid()) {
-      ndb_log_error("Failed to extract id and version from '%s' table",
+      ndb_log_error("Failed to extract id and version for table '%s' from DD",
                     m_name.c_str());
       assert(false);
       // Continue and force removal of table definition
@@ -648,9 +644,13 @@ bool Util_table_creator::install_in_DD(bool reinstall) {
 
     // Check if DD table is to be installed with a different id than
     // previously, removing the stale definition if necessary.
-    if (dd_handle.spi != ndb_handle.spi &&
-        !dd_client.remove_table(ndb_handle.spi)) {
-      ndb_log_info("Failed to remove ndbcluster-%llu from DD", ndb_handle.spi);
+    if (dd_handle.spi != ndb_handle.spi) {
+      ndb_log_verbose(1, "Removing stale table definition with id %llu from DD",
+                      ndb_handle.spi);
+      if (!dd_client.remove_table(ndb_handle.spi)) {
+        ndb_log_info("Failed to remove table definition with id %llu from DD",
+                     ndb_handle.spi);
+      }
     }
 
     /*
@@ -665,8 +665,13 @@ bool Util_table_creator::install_in_DD(bool reinstall) {
   } else {
     // Remove any stale DD table that may be occupying this
     // ndbcluster-<id> place
+    ndb_log_verbose(
+        1, "Removing potentially stale table definition with id %llu from DD",
+        ndb_handle.spi);
     if (!dd_client.remove_table(ndb_handle.spi)) {
-      ndb_log_info("Failed to remove ndbcluster-%llu from DD", ndb_handle.spi);
+      ndb_log_info(
+          "Failed to remove potentially stale table definition %llu from DD",
+          ndb_handle.spi);
     }
   }
 

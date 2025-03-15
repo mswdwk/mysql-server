@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -119,9 +120,23 @@ StmtResetForwarder::response() {
 }
 
 stdx::expected<Processor::Result, std::error_code> StmtResetForwarder::ok() {
+  auto *socket_splicer = connection()->socket_splicer();
+  auto *src_channel = socket_splicer->server_channel();
+  auto *src_protocol = connection()->server_protocol();
+  auto *dst_protocol = connection()->client_protocol();
+
+  auto msg_res =
+      ClassicFrame::recv_msg<classic_protocol::borrowed::message::server::Ok>(
+          src_channel, src_protocol);
+  if (!msg_res) return recv_server_failed(msg_res.error());
+
+  auto msg = *msg_res;
+
   if (auto &tr = tracer()) {
     tr.trace(Tracer::Event().stage("stmt_reset::ok"));
   }
+
+  dst_protocol->status_flags(msg.status_flags());
 
   stage(Stage::Done);
 

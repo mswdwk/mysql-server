@@ -1,15 +1,16 @@
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -365,6 +366,17 @@ bool Table_ref::resolve_derived(THD *thd, bool apply_semijoin) {
         if (sl->parent()->term_type() != QT_UNION) {
           my_error(ER_CTE_RECURSIVE_NOT_UNION, MYF(0));
           return true;
+        } else if (sl->parent()->parent() != nullptr) {
+          /*
+            Right-nested UNIONs with recursive query blocks are not allowed. It
+            is expected that all possible flattening of UNION blocks is done
+            beforehand. Any nested UNION indicates a mixing of UNION DISTINCT
+            and UNION ALL, which cannot be flattened further.
+          */
+          my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                   "right nested recursive query blocks, in "
+                   "Common Table Expression");
+          return true;
         }
         if (sl->is_ordered() || sl->has_limit() || sl->is_distinct()) {
           /*
@@ -561,15 +573,21 @@ bool copy_field_info(THD *thd, Item *orig_expr, Item *cloned_expr) {
 
 /**
   Given an item and a query block, this function creates a clone of the
-  item (unresolved) by reparsing the item.
+  item (unresolved) by reparsing the item. Used during condition pushdown
+  to derived tables.
 
   @param thd            Current thread.
   @param item           Item to be reparsed to get a clone.
   @param query_block    query block where expression is being parsed
+  @param derived_table  derived table to which the item belongs to.
+                        "nullptr" when cloning to make a copy of the
+                        original condition to be pushed down
+                        to a derived table that has SET operations.
 
   @returns A copy of the original item (unresolved) on success else nullptr.
 */
-static Item *parse_expression(THD *thd, Item *item, Query_block *query_block) {
+static Item *parse_expression(THD *thd, Item *item, Query_block *query_block,
+                              Table_ref *derived_table) {
   // Set up for parsing item
   LEX *const old_lex = thd->lex;
   LEX new_lex;
@@ -579,11 +597,20 @@ static Item *parse_expression(THD *thd, Item *item, Query_block *query_block) {
     thd->lex = old_lex;
     return nullptr;  // OOM
   }
+  View_creation_ctx *view_creation_ctx =
+      derived_table != nullptr ? derived_table->view_creation_ctx : nullptr;
+
+  const CHARSET_INFO *charset = view_creation_ctx != nullptr
+                                    ? view_creation_ctx->get_client_cs()
+                                    : thd->charset();
+
   // Take care not to print the variable index for stored procedure variables.
   // Also do not write a cloned stored procedure variable to query logs.
   thd->lex->reparse_derived_table_condition = true;
+
   // Get the printout of the expression
-  StringBuffer<1024> str(thd->charset());
+  StringBuffer<1024> str(charset);
+
   // For printing parameters we need to specify the flag QT_NO_DATA_EXPANSION
   // because for a case when statement gets reprepared during execution, we
   // still need Item_param::print() to print the '?' rather than the actual data
@@ -636,8 +663,9 @@ static Item *parse_expression(THD *thd, Item *item, Query_block *query_block) {
     thd->lex->param_list = old_lex->param_list;
   }
 
-  // Get a newly created item from parser
-  bool result = parse_sql(thd, &parser_state, nullptr);
+  // Get a newly created item from parser. Use the view creation
+  // context if the item being parsed is part of a view.
+  bool result = parse_sql(thd, &parser_state, view_creation_ctx);
 
   thd->lex->reparse_derived_table_condition = false;
   // lex_end() would try to destroy sphead if set. So we reset it.
@@ -668,7 +696,7 @@ static Item *parse_expression(THD *thd, Item *item, Query_block *query_block) {
   resolved item if resolving was successful else nullptr.
 */
 Item *resolve_expression(THD *thd, Item *item, Query_block *query_block) {
-  ulong save_old_privilege = thd->want_privilege;
+  const Access_bitmask save_old_privilege = thd->want_privilege;
   thd->want_privilege = 0;
   Query_block *saved_current_query_block = thd->lex->current_query_block();
   thd->lex->set_current_query_block(query_block);
@@ -676,14 +704,19 @@ Item *resolve_expression(THD *thd, Item *item, Query_block *query_block) {
   thd->lex->allow_sum_func |= static_cast<nesting_map>(1)
                               << thd->lex->current_query_block()->nest_level;
 
-  bool ret = item->fix_fields(thd, &item);
+  if (item->fix_fields(thd, &item)) {
+    return nullptr;
+  }
+  // For items with params, propagate the default data type.
+  if (item->data_type() == MYSQL_TYPE_INVALID &&
+      item->propagate_type(thd, item->default_data_type())) {
+    return nullptr;
+  }
   // Restore original state back
   thd->want_privilege = save_old_privilege;
   thd->lex->set_current_query_block(saved_current_query_block);
   thd->lex->allow_sum_func = save_allow_sum_func;
-  // If fix_fields returned error, do not return an unresolved
-  // expression.
-  return ret ? nullptr : item;
+  return item;
 }
 
 /**
@@ -741,15 +774,17 @@ Item *resolve_expression(THD *thd, Item *item, Query_block *query_block) {
   and resolve it against the tables of the query block where it will be
   placed.
 
-  @param thd      Current thread
-  @param item     Item for which clone is requested
+  @param thd            Current thread
+  @param item           Item for which clone is requested
+  @param derived_table  derived table to which the item belongs to.
 
   @returns
   Cloned object for the item.
 */
 
-Item *Query_block::clone_expression(THD *thd, Item *item) {
-  Item *cloned_item = parse_expression(thd, item, this);
+Item *Query_block::clone_expression(THD *thd, Item *item,
+                                    Table_ref *derived_table) {
+  Item *cloned_item = parse_expression(thd, item, this, derived_table);
   if (cloned_item == nullptr) return nullptr;
   if (item->item_name.is_set())
     cloned_item->item_name.set(item->item_name.ptr(), item->item_name.length());
@@ -1051,7 +1086,7 @@ bool Condition_pushdown::make_cond_for_derived() {
     if (derived_query_expression->is_set_operation()) {
       m_cond_to_push =
           derived_query_expression->outer_query_block()->clone_expression(
-              thd, orig_cond_to_push);
+              thd, orig_cond_to_push, /*derived_table=*/nullptr);
       if (m_cond_to_push == nullptr) return true;
       m_cond_to_push->apply_is_true();
     }
@@ -1131,9 +1166,11 @@ bool Condition_pushdown::make_cond_for_derived() {
 
 Item *Condition_pushdown::extract_cond_for_table(Item *cond) {
   cond->marker = Item::MARKER_NONE;
-  if ((m_checking_purpose == CHECK_FOR_DERIVED) && cond->const_item()) {
+  if ((m_checking_purpose == CHECK_FOR_DERIVED) &&
+      (cond->const_item() || cond->has_aggregation())) {
     // There is no benefit in pushing a constant condition, we can as well
     // evaluate it at the top query's level.
+    // We do not pushdown conditions with aggregate functions.
     return nullptr;
   }
   // Make a new condition
@@ -1585,7 +1622,7 @@ bool Table_ref::optimize_derived(THD *thd) {
   // doesn't care about const tables, though, so it prefers to do this
   // at execution time (in fact, it will get confused and crash if it has
   // already been materialized).
-  if (!thd->lex->using_hypergraph_optimizer) {
+  if (!thd->lex->using_hypergraph_optimizer()) {
     if (materializable_is_const() &&
         (create_materialized_table(thd) || materialize_derived(thd)))
       return true;

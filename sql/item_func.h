@@ -1,18 +1,19 @@
 #ifndef ITEM_FUNC_INCLUDED
 #define ITEM_FUNC_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -88,7 +89,15 @@ void report_conversion_error(const CHARSET_INFO *to_cs, const char *from,
 bool simplify_string_args(THD *thd, const DTCollation &c, Item **items,
                           uint nitems);
 
-String *eval_string_arg(const CHARSET_INFO *to_cs, Item *arg, String *buffer);
+String *eval_string_arg_noinline(const CHARSET_INFO *to_cs, Item *arg,
+                                 String *buffer);
+
+inline String *eval_string_arg(const CHARSET_INFO *to_cs, Item *arg,
+                               String *buffer) {
+  if (my_charset_same(to_cs, arg->collation.collation))
+    return arg->val_str(buffer);
+  return eval_string_arg_noinline(to_cs, arg, buffer);
+}
 
 class Item_func : public Item_result_field {
  protected:
@@ -3448,6 +3457,7 @@ class Item_func_match final : public Item_real_func {
   enum Functype functype() const override { return FT_FUNC; }
   const char *func_name() const override { return "match"; }
   bool fix_fields(THD *thd, Item **ref) override;
+  void update_used_tables() override;
   bool eq(const Item *, bool binary_cmp) const override;
   /* The following should be safe, even if we compare doubles */
   longlong val_int() override {

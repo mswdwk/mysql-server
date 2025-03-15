@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -1259,6 +1260,7 @@ class buf_page_t {
     m_version = 0;
     if (id.space() != UINT32_UNDEFINED) {
       m_space = fil_space_get(id.space());
+      /* There could be non-existent tablespace while importing it */
       if (m_space) {
         m_space->inc_ref();
         /* We don't have a way to check the MDL locks, which are guarding the
@@ -1883,6 +1885,17 @@ struct buf_block_t {
     return (mach_read_from_2(frame + FIL_PAGE_TYPE));
   }
 
+  uint16_t get_page_level() const;
+  bool is_leaf() const;
+  bool is_root() const;
+  bool is_index_page() const;
+
+  /** Check if this index page is empty.  An index page is considered empty
+  if the next record of an infimum record is supremum record.  Presence of
+  del-marked records will make the page non-empty.
+  @return true if this index page is empty. */
+  bool is_empty() const;
+
   /** Get the page type of the current buffer block as string.
   @return page type of the current buffer block as string. */
   [[nodiscard]] const char *get_page_type_str() const noexcept;
@@ -1900,6 +1913,16 @@ struct buf_block_t {
     return page.zip.data != nullptr ? &page.zip : nullptr;
   }
 };
+
+inline bool buf_block_t::is_root() const {
+  return ((get_next_page_no() == FIL_NULL) && (get_prev_page_no() == FIL_NULL));
+}
+
+inline bool buf_block_t::is_leaf() const { return get_page_level() == 0; }
+
+inline bool buf_block_t::is_index_page() const {
+  return get_page_type() == FIL_PAGE_INDEX;
+}
 
 /** Check if a buf_block_t object is in a valid state
 @param block buffer block

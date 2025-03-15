@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -628,7 +629,9 @@ bool Item_bool_func2::resolve_type(THD *thd) {
   // Both arguments are needed for type resolving
   assert(args[0] && args[1]);
 
-  Item_bool_func::resolve_type(thd);
+  if (Item_bool_func::resolve_type(thd)) {
+    return true;
+  }
   /*
     See agg_item_charsets() in item.cc for comments
     on character set and collation aggregation.
@@ -1014,11 +1017,10 @@ bool Arg_comparator::get_date_from_const(Item *date_arg, Item *str_arg,
       value = get_date_from_str(thd, str_val, t_type, date_arg->item_name.ptr(),
                                 &error);
       if (error) {
-        const char *typestr = (date_arg_type == MYSQL_TYPE_DATE)
-                                  ? "DATE"
-                                  : (date_arg_type == MYSQL_TYPE_DATETIME)
-                                        ? "DATETIME"
-                                        : "TIMESTAMP";
+        const char *typestr = (date_arg_type == MYSQL_TYPE_DATE) ? "DATE"
+                              : (date_arg_type == MYSQL_TYPE_DATETIME)
+                                  ? "DATETIME"
+                                  : "TIMESTAMP";
 
         ErrConvString err(str_val->ptr(), str_val->length(),
                           thd->variables.character_set_client);
@@ -1142,6 +1144,7 @@ bool Arg_comparator::set_cmp_func(Item_result_field *owner_arg, Item **left_arg,
                               (*right)->data_type() == MYSQL_TYPE_JSON))) {
     // Use the JSON comparator if at least one of the arguments is JSON.
     func = &Arg_comparator::compare_json;
+    m_compare_type = STRING_RESULT;
     // Convention: Immediate dynamic parameters are handled as scalars:
     (*left)->mark_json_as_scalar();
     (*right)->mark_json_as_scalar();
@@ -2038,6 +2041,7 @@ static bool compare_pair_for_nulls(Item *a, Item *b, bool *result) {
     *result = a_null == b_null;
     return true;
   }
+  *result = false;
   return false;
 }
 
@@ -2051,6 +2055,21 @@ bool Arg_comparator::compare_null_values() {
   bool result;
   (void)compare_pair_for_nulls(*left, *right, &result);
   return result;
+}
+
+void Item_bool_func::set_created_by_in2exists() {
+  m_created_by_in2exists = true;
+  // When a condition is created by IN to EXISTS transformation,
+  // it re-uses the expressions that are part of the query. As a
+  // result we need to increment the reference count
+  // for these expressions.
+  WalkItem(this, enum_walk::PREFIX | enum_walk::SUBQUERY, [](Item *inner_item) {
+    // Reference counting matters only for referenced items.
+    if (inner_item->type() == REF_ITEM) {
+      down_cast<Item_ref *>(inner_item)->ref_item()->increment_ref_count();
+    }
+    return false;
+  });
 }
 
 const char *Item_bool_func::bool_transform_names[10] = {"is true",
@@ -3083,10 +3102,9 @@ static inline longlong compare_between_int_result(
     bool negated, Item **args, bool *null_value) {
   {
     LLorULL a, b, value;
-    value = compare_as_temporal_times
-                ? args[0]->val_time_temporal()
-                : compare_as_temporal_dates ? args[0]->val_date_temporal()
-                                            : args[0]->val_int();
+    value = compare_as_temporal_times   ? args[0]->val_time_temporal()
+            : compare_as_temporal_dates ? args[0]->val_date_temporal()
+                                        : args[0]->val_int();
     if ((*null_value = args[0]->null_value)) return 0; /* purecov: inspected */
     if (compare_as_temporal_times) {
       a = args[1]->val_time_temporal();
@@ -3268,11 +3286,13 @@ Field *Item_func_ifnull::tmp_table_field(TABLE *table) {
 double Item_func_ifnull::real_op() {
   assert(fixed == 1);
   double value = args[0]->val_real();
+  if (current_thd->is_error()) return error_real();
   if (!args[0]->null_value) {
     null_value = false;
     return value;
   }
   value = args[1]->val_real();
+  if (current_thd->is_error()) return error_real();
   if ((null_value = args[1]->null_value)) return 0.0;
   return value;
 }
@@ -3280,11 +3300,13 @@ double Item_func_ifnull::real_op() {
 longlong Item_func_ifnull::int_op() {
   assert(fixed == 1);
   longlong value = args[0]->val_int();
+  if (current_thd->is_error()) return error_int();
   if (!args[0]->null_value) {
     null_value = false;
     return value;
   }
   value = args[1]->val_int();
+  if (current_thd->is_error()) return error_int();
   if ((null_value = args[1]->null_value)) return 0;
   return value;
 }
@@ -3292,11 +3314,13 @@ longlong Item_func_ifnull::int_op() {
 my_decimal *Item_func_ifnull::decimal_op(my_decimal *decimal_value) {
   assert(fixed == 1);
   my_decimal *value = args[0]->val_decimal(decimal_value);
+  if (current_thd->is_error()) return error_decimal(decimal_value);
   if (!args[0]->null_value) {
     null_value = false;
     return value;
   }
   value = args[1]->val_decimal(decimal_value);
+  if (current_thd->is_error()) return error_decimal(decimal_value);
   if ((null_value = args[1]->null_value)) return nullptr;
   return value;
 }
@@ -3331,12 +3355,15 @@ bool Item_func_ifnull::time_op(MYSQL_TIME *ltime) {
 String *Item_func_ifnull::str_op(String *str) {
   assert(fixed == 1);
   String *res = args[0]->val_str(str);
+  if (current_thd->is_error()) return error_str();
   if (!args[0]->null_value) {
     null_value = false;
     res->set_charset(collation.collation);
     return res;
   }
   res = args[1]->val_str(str);
+  if (current_thd->is_error()) return error_str();
+
   if ((null_value = args[1]->null_value)) return nullptr;
   res->set_charset(collation.collation);
   return res;
@@ -3689,9 +3716,9 @@ String *Item_func_case::val_str(String *str) {
       return val_string_from_time(str);
     default: {
       Item *item = find_item(str);
-      if (item) {
-        String *res;
-        if ((res = item->val_str(str))) {
+      if (item != nullptr) {
+        String *res = item->val_str(str);
+        if (res != nullptr) {
           res->set_charset(collation.collation);
           null_value = false;
           return res;
@@ -3699,57 +3726,68 @@ String *Item_func_case::val_str(String *str) {
       }
     }
   }
-  null_value = true;
-  return (String *)nullptr;
+  if (current_thd->is_error()) {
+    return error_str();
+  } else {
+    return null_return_str();
+  }
 }
 
 longlong Item_func_case::val_int() {
   assert(fixed == 1);
-  char buff[MAX_FIELD_WIDTH];
-  String dummy_str(buff, sizeof(buff), default_charset());
+  StringBuffer<MAX_FIELD_WIDTH> dummy_str(default_charset());
   Item *item = find_item(&dummy_str);
-  longlong res;
 
-  if (!item) {
-    null_value = true;
-    return 0;
+  if (item != nullptr) {
+    const longlong res = item->val_int();
+    null_value = item->null_value;
+    return res;
   }
-  res = item->val_int();
-  null_value = item->null_value;
-  return res;
+
+  if (current_thd->is_error()) {
+    return error_int();
+  }
+
+  null_value = true;
+  return 0;
 }
 
 double Item_func_case::val_real() {
   assert(fixed == 1);
-  char buff[MAX_FIELD_WIDTH];
-  String dummy_str(buff, sizeof(buff), default_charset());
+  StringBuffer<MAX_FIELD_WIDTH> dummy_str(default_charset());
   Item *item = find_item(&dummy_str);
-  double res;
 
-  if (!item) {
-    null_value = true;
-    return 0;
+  if (item != nullptr) {
+    const double res = item->val_real();
+    null_value = item->null_value;
+    return res;
   }
-  res = item->val_real();
-  null_value = item->null_value;
-  return res;
+
+  if (current_thd->is_error()) {
+    return error_real();
+  }
+
+  null_value = true;
+  return 0.0;
 }
 
 my_decimal *Item_func_case::val_decimal(my_decimal *decimal_value) {
   assert(fixed == 1);
-  char buff[MAX_FIELD_WIDTH];
-  String dummy_str(buff, sizeof(buff), default_charset());
+  StringBuffer<MAX_FIELD_WIDTH> dummy_str(default_charset());
   Item *item = find_item(&dummy_str);
-  my_decimal *res;
 
-  if (!item) {
-    null_value = true;
-    return nullptr;
+  if (item != nullptr) {
+    my_decimal *res = item->val_decimal(decimal_value);
+    null_value = item->null_value;
+    return res;
   }
 
-  res = item->val_decimal(decimal_value);
-  null_value = item->null_value;
-  return res;
+  if (current_thd->is_error()) {
+    return error_decimal(decimal_value);
+  }
+
+  null_value = true;
+  return nullptr;
 }
 
 bool Item_func_case::val_json(Json_wrapper *wr) {
@@ -4072,8 +4110,9 @@ String *Item_func_coalesce::str_op(String *str) {
   assert(fixed == 1);
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
-    String *res;
-    if ((res = args[i]->val_str(str))) return res;
+    String *res = args[i]->val_str(str);
+    if (current_thd->is_error()) return error_str();
+    if (res != nullptr) return res;
   }
   null_value = true;
   return nullptr;
@@ -4098,6 +4137,7 @@ longlong Item_func_coalesce::int_op() {
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
     longlong res = args[i]->val_int();
+    if (current_thd->is_error()) return error_int();
     if (!args[i]->null_value) return res;
   }
   null_value = true;
@@ -4109,6 +4149,7 @@ double Item_func_coalesce::real_op() {
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
     double res = args[i]->val_real();
+    if (current_thd->is_error()) return error_int();
     if (!args[i]->null_value) return res;
   }
   null_value = true;
@@ -4120,6 +4161,7 @@ my_decimal *Item_func_coalesce::decimal_op(my_decimal *decimal_value) {
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
     my_decimal *res = args[i]->val_decimal(decimal_value);
+    if (current_thd->is_error()) return error_decimal(decimal_value);
     if (!args[i]->null_value) return res;
   }
   null_value = true;
@@ -4363,22 +4405,24 @@ in_string::in_string(MEM_ROOT *mem_root, uint elements, const CHARSET_INFO *cs)
   }
 }
 
+void in_string::cleanup() {
+  // Clear reference pointers and free any memory allocated for holding data.
+  for (uint i = 0; i < m_used_size; i++) {
+    String *str = base_pointers[i];
+    str->set(static_cast<const char *>(nullptr), 0, str->charset());
+  }
+}
+
 void in_string::set(uint pos, Item *item) {
   String *str = base_pointers[pos];
   String *res = eval_string_arg(collation, item, str);
-  if (res && res != str) {
-    if (res->uses_buffer_owned_by(str)) res->copy();
-    if (item->type() == Item::FUNC_ITEM)
-      str->copy(*res);
-    else
-      *str = *res;
-  }
-  if (!str->charset()) {
-    const CHARSET_INFO *cs;
-    if (!(cs = item->collation.collation))
-      cs = &my_charset_bin;  // Should never happen for STR items
-    str->set_charset(cs);
-  }
+  if (res == nullptr || res == str) return;
+
+  if (res->uses_buffer_owned_by(str)) res->copy();
+  if (item->type() == Item::FUNC_ITEM)
+    str->copy(*res);
+  else
+    *str = *res;
 }
 
 static int srtcmp_in(const CHARSET_INFO *cs, const String *x, const String *y) {
@@ -4640,11 +4684,16 @@ bool cmp_item_row::allocate_template_comparators(THD *thd, Item *item) {
 void cmp_item_row::store_value(Item *item) {
   DBUG_TRACE;
   assert(comparators != nullptr);
-  item->bring_value();
   item->null_value = false;
-  for (uint i = 0; i < n; i++) {
-    comparators[i]->store_value(item->element_index(i));
-    item->null_value |= item->element_index(i)->null_value;
+  item->bring_value();
+  if (item->null_value) {
+    set_null_value(/*nv=*/true);
+  } else {
+    item->null_value = false;
+    for (uint i = 0; i < n; i++) {
+      comparators[i]->store_value(item->element_index(i));
+      item->null_value |= item->element_index(i)->null_value;
+    }
   }
 }
 
@@ -4670,12 +4719,17 @@ bool cmp_item_row::allocate_value_comparators(MEM_ROOT *mem_root,
 
 void cmp_item_row::store_value_by_template(cmp_item *t, Item *item) {
   cmp_item_row *tmpl = (cmp_item_row *)t;
-  item->bring_value();
   item->null_value = false;
-  for (uint i = 0; i < n; i++) {
-    comparators[i]->store_value_by_template(tmpl->comparators[i],
-                                            item->element_index(i));
-    item->null_value |= item->element_index(i)->null_value;
+  item->bring_value();
+  if (item->null_value) {
+    set_null_value(/*nv=*/true);
+  } else {
+    item->null_value = false;
+    for (uint i = 0; i < n; i++) {
+      comparators[i]->store_value_by_template(tmpl->comparators[i],
+                                              item->element_index(i));
+      item->null_value |= item->element_index(i)->null_value;
+    }
   }
 }
 
@@ -5359,7 +5413,10 @@ void Item_func_in::cleanup() {
   DBUG_TRACE;
   Item_int_func::cleanup();
   // Trigger re-population in next execution (if bisection is used)
-  if (m_need_populate) m_populated = false;
+  if (m_need_populate) {
+    if (m_const_array != nullptr) m_const_array->cleanup();
+    m_populated = false;
+  }
 
   if (!first_resolve_call) {
     /*
@@ -7565,6 +7622,23 @@ static bool append_hash_for_string_value(Item *comparand,
   return false;
 }
 
+static bool append_hash_for_json_value(Item *comparand,
+                                       String *join_key_buffer) {
+  Json_wrapper value;
+  StringBuffer<STRING_BUFFER_USUAL_SIZE> buffer1, buffer2;
+  if (get_json_atom_wrapper(
+          &comparand, /*arg_idx=*/0, /*calling_function=*/"hash", &buffer1,
+          &buffer2, &value, /*scalar=*/nullptr, /*accept_string=*/true)) {
+    return true;
+  }
+
+  if (comparand->null_value) return true;
+
+  const uint64_t hash = value.make_hash_key(/*hash_val=*/0);
+  return join_key_buffer->append(pointer_cast<const char *>(&hash),
+                                 sizeof(hash));
+}
+
 // Append a decimal value to join_key_buffer, extracted from "comparand".
 //
 // The number of bytes written depends on the actual value. (Leading zero digits
@@ -7679,6 +7753,11 @@ static bool extract_value_for_hash_join(THD *thd,
 
   switch (comparator->get_compare_type()) {
     case STRING_RESULT: {
+      if (comparator->compare_as_json()) {
+        // JSON values can be large, so we don't store the full sort key.
+        assert(!join_condition.store_full_sort_key());
+        return append_hash_for_json_value(comparand, join_key_buffer);
+      }
       if (join_condition.store_full_sort_key()) {
         return append_string_value(
             comparand, comparator->cmp_collation.collation,

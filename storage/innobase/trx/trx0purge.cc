@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -64,6 +65,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0roll.h"
 #include "trx0rseg.h"
 #include "trx0trx.h"
+#include "ut0math.h"
 
 /** Maximum allowable purge history length.  <=0 means 'infinite'. */
 ulong srv_max_purge_lag = 0;
@@ -220,7 +222,6 @@ void trx_purge_sys_mem_create() {
   new (&purge_sys->iter) purge_iter_t;
   new (&purge_sys->limit) purge_iter_t;
   new (&purge_sys->undo_trunc) undo::Truncate;
-  new (&purge_sys->thds) ut::unordered_set<THD *>;
   new (&purge_sys->rsegs_queue) std::vector<trx_rseg_t *>;
 #ifdef UNIV_DEBUG
   new (&purge_sys->done) purge_iter_t;
@@ -301,7 +302,6 @@ void trx_purge_sys_close() {
 
   ut::delete_(purge_sys->rseg_iter);
 
-  call_destructor(&purge_sys->thds);
   call_destructor(&purge_sys->undo_trunc);
   call_destructor(&purge_sys->rsegs_queue);
 
@@ -955,7 +955,7 @@ dberr_t start_logging(Tablespace *undo_space) {
   bool ret;
   pfs_os_file_t handle =
       os_file_create(innodb_log_file_key, log_file_name, OS_FILE_CREATE,
-                     OS_FILE_NORMAL, OS_LOG_FILE, srv_read_only_mode, &ret);
+                     OS_LOG_FILE, srv_read_only_mode, &ret);
   if (!ret) {
     return (DB_IO_ERROR);
   }
@@ -2105,8 +2105,7 @@ std::size_t Purge_groups_t::find_smallest_group() {
 
 std::ostream &Purge_groups_t::print(std::ostream &out) const {
   const std::size_t n_purge_threads = m_groups.size();
-  const std::size_t max_n =
-      (m_total_rec + n_purge_threads - 1) / n_purge_threads;
+  const std::size_t max_n = ut::div_ceil(m_total_rec, n_purge_threads);
   const std::size_t min_n =
       (max_n > n_purge_threads) ? max_n - n_purge_threads : 0;
 
@@ -2125,8 +2124,7 @@ std::ostream &Purge_groups_t::print(std::ostream &out) const {
 #ifdef UNIV_DEBUG
 bool Purge_groups_t::is_grouping_uniform() const {
   const std::size_t n_purge_threads = m_groups.size();
-  const std::size_t max_n =
-      (m_total_rec + n_purge_threads - 1) / n_purge_threads;
+  const std::size_t max_n = ut::div_ceil(m_total_rec, n_purge_threads);
   const std::size_t min_n =
       (max_n > n_purge_threads) ? max_n - n_purge_threads : 0;
   bool result = true;
@@ -2143,8 +2141,7 @@ bool Purge_groups_t::is_grouping_uniform() const {
 
 void Purge_groups_t::distribute() {
   const std::size_t n_purge_threads = m_groups.size();
-  const std::size_t max_n =
-      (m_total_rec + n_purge_threads - 1) / n_purge_threads;
+  const std::size_t max_n = ut::div_ceil(m_total_rec, n_purge_threads);
 
   for (std::size_t i = 0; i < 2; ++i) {
     bool need_second_pass = false;

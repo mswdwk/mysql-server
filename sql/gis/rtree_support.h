@@ -1,18 +1,19 @@
 #ifndef SQL_GIS_RTREE_SUPPORT_H_INCLUDED
 #define SQL_GIS_RTREE_SUPPORT_H_INCLUDED
 
-// Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -77,7 +78,27 @@ dd::Spatial_reference_system *fetch_srs(gis::srid_t srid);
 bool mbr_contain_cmp(const dd::Spatial_reference_system *srs, rtr_mbr_t *a,
                      rtr_mbr_t *b);
 
-/// Checks if two MBRs are equal
+/// Checks if two MBRs are equal physically
+///
+/// There is another function mbr_equal_logically(), which checks for
+/// equality in logical sense.
+///
+/// For both MBRs, the coordinates of the MBR's minimum corners must be smaller
+/// than or equal to the corresponding coordinates of the maximum corner.
+///
+/// @param[in] a The first MBR.
+/// @param[in] b The second MBR.
+///
+/// @retval true The two MBRs are equal physically.
+/// @retval false The two MBRs aren't equal physically.
+bool mbr_equal_physically(rtr_mbr_t *a, rtr_mbr_t *b);
+
+/// Checks if two MBRs are equal logically
+///
+/// Comparison is epsilon based using boost geometry.
+///
+/// There is another function mbr_equal_physically(), which checks for
+/// equality in physical sense.
 ///
 /// For both MBRs, the coordinates of the MBR's minimum corners must be smaller
 /// than or equal to the corresponding coordinates of the maximum corner.
@@ -86,10 +107,10 @@ bool mbr_contain_cmp(const dd::Spatial_reference_system *srs, rtr_mbr_t *a,
 /// @param[in] a The first MBR.
 /// @param[in] b The second MBR.
 ///
-/// @retval true The two MBRs are equal.
-/// @retval false The two MBRs aren't equal.
-bool mbr_equal_cmp(const dd::Spatial_reference_system *srs, rtr_mbr_t *a,
-                   rtr_mbr_t *b);
+/// @retval true The two MBRs are equal logically.
+/// @retval false The two MBRs aren't equal logically.
+bool mbr_equal_logically(const dd::Spatial_reference_system *srs, rtr_mbr_t *a,
+                         rtr_mbr_t *b);
 
 /// Checks if two MBRs intersect each other
 ///

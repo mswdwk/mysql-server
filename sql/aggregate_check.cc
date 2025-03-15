@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -116,6 +117,7 @@ bool Distinct_check::check_query(THD *thd) {
     assert((*order->item)->fixed);
     uint counter;
     enum_resolution_type resolution;
+    Item **res;
     /*
       Search if this expression is equal to one in the SELECT
       list. setup_order()/find_order_in_list() has already done so, but not
@@ -145,12 +147,11 @@ bool Distinct_check::check_query(THD *thd) {
       differ due to white space....).
       Subqueries in ORDER BY are non-standard anyway.
     */
-    Item **const res =
-        find_item_in_list(thd, *order->item, &select->fields, &counter,
-                          REPORT_EXCEPT_NOT_FOUND, &resolution);
-    if (res == nullptr)  // Other error than "not found", my_error() was called
-      return true;       /* purecov: inspected */
-    if (res != not_found_item)  // is in SELECT list
+    if (find_item_in_list(thd, *order->item, &select->fields, &res, &counter,
+                          &resolution)) {
+      return true; /* purecov: inspected */
+    }
+    if (res != nullptr)  // is in SELECT list
       continue;
     /*
       [numbers refer to the function's comment]
@@ -269,13 +270,13 @@ bool Group_check::check_expression(THD *thd, Item *expr, bool in_select_list) {
   if (!in_select_list) {
     uint counter;
     enum_resolution_type resolution;
-    // Search if this expression is equal to one in the SELECT list.
-    Item **const res = find_item_in_list(thd, expr, &select->fields, &counter,
-                                         REPORT_EXCEPT_NOT_FOUND, &resolution);
-    if (res == nullptr)  // Other error than "not found", my_error() was called
-      return true;       /* purecov: inspected */
-    if (res != not_found_item) {
-      // is in SELECT list, which has already been validated.
+    Item **res;
+    // Check if this expression is equal to one in the SELECT list.
+    if (find_item_in_list(thd, expr, &select->fields, &res, &counter,
+                          &resolution)) {
+      return true; /* purecov: inspected */
+    }
+    if (res != nullptr) {  // in SELECT list, which has already been validated.
       return false;
     }
   }

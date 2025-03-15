@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,30 +21,31 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <mysql/components/component_implementation.h>
-#include <mysql/components/minimal_chassis.h>
-#include <mysql/components/my_service.h>
-#include <mysql/components/services/dynamic_loader_scheme_file.h>
-#include <mysql/components/services/keyring_aes.h>
-#include <mysql/components/services/keyring_generator.h>
-#include <mysql/components/services/keyring_keys_metadata_iterator.h>
-#include <mysql/components/services/keyring_load.h>
-#include <mysql/components/services/keyring_metadata_query.h>
-#include <mysql/components/services/keyring_reader_with_status.h>
-#include <mysql/components/services/keyring_writer.h>
-#include <mysql/components/services/mysql_audit_print_service_double_data_source.h>
-#include <mysql/components/services/mysql_audit_print_service_longlong_data_source.h>
-#include <mysql/components/services/mysql_command_consumer.h>
-#include <mysql/components/services/mysql_command_services.h>
-#include <mysql/components/services/mysql_cond_service.h>
-#include <mysql/components/services/mysql_mutex_service.h>
-#include <mysql/components/services/mysql_psi_system_service.h>
-#include <mysql/components/services/mysql_query_attributes.h>
-#include <mysql/components/services/mysql_runtime_error_service.h>
-#include <mysql/components/services/mysql_rwlock_service.h>
-#include <mysql/components/services/mysql_status_variable_reader.h>
-#include <mysql/components/services/mysql_system_variable.h>
-#include <mysql/components/services/table_access_service.h>
+#include "mysql/components/component_implementation.h"
+#include "mysql/components/minimal_chassis.h"
+#include "mysql/components/my_service.h"
+#include "mysql/components/services/dynamic_loader_scheme_file.h"
+#include "mysql/components/services/keyring_aes.h"
+#include "mysql/components/services/keyring_generator.h"
+#include "mysql/components/services/keyring_keys_metadata_iterator.h"
+#include "mysql/components/services/keyring_load.h"
+#include "mysql/components/services/keyring_metadata_query.h"
+#include "mysql/components/services/keyring_reader_with_status.h"
+#include "mysql/components/services/keyring_writer.h"
+#include "mysql/components/services/mysql_audit_print_service_double_data_source.h"
+#include "mysql/components/services/mysql_audit_print_service_longlong_data_source.h"
+#include "mysql/components/services/mysql_command_consumer.h"
+#include "mysql/components/services/mysql_command_services.h"
+#include "mysql/components/services/mysql_cond_service.h"
+#include "mysql/components/services/mysql_mutex_service.h"
+#include "mysql/components/services/mysql_psi_system_service.h"
+#include "mysql/components/services/mysql_query_attributes.h"
+#include "mysql/components/services/mysql_runtime_error_service.h"
+#include "mysql/components/services/mysql_rwlock_service.h"
+#include "mysql/components/services/mysql_simple_error_log.h"
+#include "mysql/components/services/mysql_status_variable_reader.h"
+#include "mysql/components/services/mysql_system_variable.h"
+#include "mysql/components/services/table_access_service.h"
 
 // pfs services
 #include "storage/perfschema/pfs.h"
@@ -77,6 +79,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "mysql_runtime_error_imp.h"
 #include "mysql_server_keyring_lockable_imp.h"
 #include "mysql_server_runnable_imp.h"
+#include "mysql_simple_error_log_imp.h"
 #include "mysql_status_variable_reader_imp.h"
 #include "mysql_string_service_imp.h"
 #include "mysql_system_variable_update_imp.h"
@@ -169,6 +172,9 @@ mysql_string_imp::iterator_create, mysql_string_imp::iterator_get_next,
 BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_string_ctype)
 mysql_string_imp::is_upper, mysql_string_imp::is_lower,
     mysql_string_imp::is_digit END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_string_value)
+mysql_string_imp::get END_SERVICE_IMPLEMENTATION();
 
 BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_string_reset)
 mysql_string_imp::reset END_SERVICE_IMPLEMENTATION();
@@ -556,6 +562,9 @@ Mysql_thd_store_service_imp::register_slot,
     Mysql_thd_store_service_imp::set, Mysql_thd_store_service_imp::get,
     END_SERVICE_IMPLEMENTATION();
 
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_simple_error_log)
+mysql_simple_error_log_imp::emit END_SERVICE_IMPLEMENTATION();
+
 BEGIN_COMPONENT_PROVIDES(mysql_server)
 PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(mysql_server, persistent_dynamic_loader),
@@ -570,6 +579,7 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(mysql_server, mysql_string_byte_access),
     PROVIDES_SERVICE(mysql_server, mysql_string_iterator),
     PROVIDES_SERVICE(mysql_server, mysql_string_ctype),
+    PROVIDES_SERVICE(mysql_server, mysql_string_value),
     PROVIDES_SERVICE(mysql_server, mysql_string_reset),
     PROVIDES_SERVICE(mysql_server, mysql_string_append),
     PROVIDES_SERVICE(mysql_server, mysql_string_substr),
@@ -621,9 +631,11 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(performance_schema, psi_error_v1),
     PROVIDES_SERVICE(performance_schema, psi_file_v2),
     PROVIDES_SERVICE(performance_schema, psi_idle_v1),
-    /* Deprecated, use psi_mdl_v2. */
+    /* Deprecated, use psi_mdl_v3. */
     PROVIDES_SERVICE(performance_schema, psi_mdl_v1),
+    /* Deprecated, use psi_mdl_v3. */
     PROVIDES_SERVICE(performance_schema, psi_mdl_v2),
+    PROVIDES_SERVICE(performance_schema, psi_mdl_v3),
     /* Obsolete: PROVIDES_SERVICE(performance_schema, psi_memory_v1), */
     PROVIDES_SERVICE(performance_schema, psi_memory_v2),
     PROVIDES_SERVICE(performance_schema, psi_mutex_v1),
@@ -666,6 +678,7 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(performance_schema, pfs_plugin_column_year_v1),
     PROVIDES_SERVICE(performance_schema, psi_tls_channel_v1),
     PROVIDES_SERVICE(performance_schema, mysql_server_telemetry_traces_v1),
+    PROVIDES_SERVICE(performance_schema, pfs_plugin_column_text_v1),
 
     PROVIDES_SERVICE(mysql_server, mysql_query_attributes_iterator),
     PROVIDES_SERVICE(mysql_server, mysql_query_attribute_string),
@@ -719,6 +732,7 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(mysql_server, mysql_status_variable_string),
     PROVIDES_SERVICE(mysql_server, mysql_thd_store),
     PROVIDES_SERVICE(mysql_server, mysql_command_field_metadata),
+    PROVIDES_SERVICE(mysql_server, mysql_simple_error_log),
     END_COMPONENT_PROVIDES();
 
 static BEGIN_COMPONENT_REQUIRES(mysql_server) END_COMPONENT_REQUIRES();

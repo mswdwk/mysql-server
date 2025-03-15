@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -476,7 +477,7 @@ mtr_log_t mtr_t::set_log_mode(mtr_log_t mode) {
 #ifdef UNIV_DEBUG
   if (mode == MTR_LOG_NO_REDO && old_mode == MTR_LOG_ALL) {
     /* Should change to no redo mode before generating any redo. */
-    ut_ad(m_impl.m_n_log_recs == 0);
+    ut_ad(!has_any_log_record());
   }
 #endif /* UNIV_DEBUG */
 
@@ -494,18 +495,6 @@ mtr_log_t mtr_t::set_log_mode(mtr_log_t mode) {
 #endif /* !UNIV_HOTBACKUP */
 
   return old_mode;
-}
-
-/** Check if a mini-transaction is dirtying a clean page.
-@return true if the mtr is dirtying a clean page. */
-bool mtr_t::is_block_dirtied(const buf_block_t *block) {
-  ut_ad(buf_block_get_state(block) == BUF_BLOCK_FILE_PAGE);
-  ut_ad(block->page.buf_fix_count > 0);
-
-  /* It is OK to read oldest_modification because no
-  other thread can be performing a write of it and it
-  is only during write that the value is reset to 0. */
-  return !block->page.is_dirty();
 }
 
 #ifndef UNIV_HOTBACKUP
@@ -593,7 +582,6 @@ void mtr_t::start(bool sync) {
   m_impl.m_log_mode = MTR_LOG_ALL;
   m_impl.m_inside_ibuf = false;
   m_impl.m_modifications = false;
-  m_impl.m_made_dirty = false;
   m_impl.m_n_log_recs = 0;
   m_impl.m_state = MTR_STATE_ACTIVE;
   m_impl.m_flush_observer = nullptr;
@@ -681,8 +669,8 @@ void mtr_t::commit() {
 
   Command cmd(this);
 
-  if (m_impl.m_n_log_recs > 0 ||
-      (m_impl.m_modifications && m_impl.m_log_mode == MTR_LOG_NO_REDO)) {
+  if (has_any_log_record() ||
+      (has_modifications() && m_impl.m_log_mode == MTR_LOG_NO_REDO)) {
     ut_ad(!srv_read_only_mode || m_impl.m_log_mode == MTR_LOG_NO_REDO);
 
     cmd.execute();
@@ -734,7 +722,7 @@ void mtr_t::memo_release(const void *object, ulint type) {
 
   /* We cannot release a page that has been written to in the
   middle of a mini-transaction. */
-  ut_ad(!m_impl.m_modifications || type != MTR_MEMO_PAGE_X_FIX);
+  ut_ad(!has_modifications() || type != MTR_MEMO_PAGE_X_FIX);
 
   Find find(object, type);
   Iterate<Find> iterator(find);
@@ -753,7 +741,7 @@ void mtr_t::release_page(const void *ptr, mtr_memo_type_t type) {
 
   /* We cannot release a page that has been written to in the
   middle of a mini-transaction. */
-  ut_ad(!m_impl.m_modifications || type != MTR_MEMO_PAGE_X_FIX);
+  ut_ad(!has_modifications() || type != MTR_MEMO_PAGE_X_FIX);
 
   Find_page find(ptr, type);
   Iterate<Find_page> iterator(find);
@@ -794,17 +782,13 @@ ulint mtr_t::Command::prepare_write() {
   ulint len = m_impl->m_log.size();
   ut_ad(len > 0);
 
-  ulint n_recs = m_impl->m_n_log_recs;
+  const auto n_recs = m_impl->m_n_log_recs;
   ut_ad(n_recs > 0);
 
   ut_ad(log_sys != nullptr);
 
-  ut_ad(m_impl->m_n_log_recs == n_recs);
-
   /* This was not the first time of dirtying a
   tablespace since the latest checkpoint. */
-
-  ut_ad(n_recs == m_impl->m_n_log_recs);
 
   if (n_recs <= 1) {
     ut_ad(n_recs == 1);

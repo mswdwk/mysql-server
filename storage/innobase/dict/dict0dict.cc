@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -1551,7 +1552,12 @@ dberr_t dict_table_rename_in_cache(
 
     ut_ad(!table->is_temporary());
 
+    /* In case of explicit data dir setting or
+    table recreation(ALTER TABLE .. FORCE/ALTER TABLE .. ENGINE)
+    from a non-default path, the new table path should be same
+    as the source/old path. */
     if (DICT_TF_HAS_DATA_DIR(table->flags)) {
+      ut_ad(old_path != nullptr);
       std::string new_ibd;
 
       new_ibd = Fil_path::make_new_path(old_path, new_name, IBD);
@@ -1977,6 +1983,8 @@ void dict_partitioned_table_remove_from_cache(const char *name) {
   ut_ad(dict_sys_mutex_own());
 
   size_t name_len = strlen(name);
+  const auto name_with_separator =
+      std::string{name, name_len} + dict_name::PART_SEPARATOR;
 
   for (uint32_t i = 0; i < hash_get_n_cells(dict_sys->table_id_hash); ++i) {
     dict_table_t *table;
@@ -1994,8 +2002,10 @@ void dict_partitioned_table_remove_from_cache(const char *name) {
         continue;
       }
 
-      if ((strncmp(name, prev_table->name.m_name, name_len) == 0) &&
-          dict_table_is_partition(prev_table)) {
+      /* Find all the partitions or subpartitions of table with name */
+      if (!strncmp(name_with_separator.data(), prev_table->name.m_name,
+                   name_with_separator.size())) {
+        ut_a(dict_table_is_partition(prev_table));
         btr_drop_ahi_for_table(prev_table);
         dict_table_remove_from_cache(prev_table);
       }
@@ -2718,6 +2728,21 @@ void dict_index_remove_from_cache(dict_table_t *table, /*!< in/out: table */
   dict_index_remove_from_cache_low(table, index, false);
 }
 
+std::vector<table_id_t> dict_get_all_table_ids() {
+  std::vector<table_id_t> ids;
+  mutex_enter(&dict_sys->mutex);
+  ids.reserve(dict_sys->table_LRU.get_length() +
+              dict_sys->table_non_LRU.get_length());
+  for (dict_table_t *table : dict_sys->table_LRU) {
+    ids.push_back(table->id);
+  }
+  for (dict_table_t *table : dict_sys->table_non_LRU) {
+    ids.push_back(table->id);
+  }
+  mutex_exit(&dict_sys->mutex);
+  return ids;
+}
+
 /** Duplicate a virtual column information
 @param[in]      v_col   virtual column information to duplicate
 @param[in,out]  heap    memory heap
@@ -3129,11 +3154,13 @@ static dict_index_t *dict_index_build_internal_clust(
 
   ut::free(indexed);
 
-  if (!table->is_system_table) {
-    if (table->has_row_versions()) {
-      new_index->create_fields_array();
-    }
-    new_index->create_nullables(table->current_row_version);
+  new_index->create_nullables(table->current_row_version);
+
+  if (table->has_row_versions()) {
+    new_index->create_fields_array();
+  } else {
+    /* Table with no row version are considered of version 0 */
+    ut_a(new_index->get_nullable_in_version(0) == new_index->n_nullable);
   }
 
   ut_ad(UT_LIST_GET_LEN(table->indexes) == 0);
@@ -4043,6 +4070,8 @@ void dict_table_read_dynamic_metadata(const byte *buffer, ulint size,
 
     persister = dict_persist->persisters->get(type);
     ut_ad(persister != nullptr);
+    pos++;
+    size--;
 
     consumed = persister->read(*metadata, pos, size, &corrupt);
     ut_ad(consumed != 0);
@@ -4071,18 +4100,16 @@ void dict_table_load_dynamic_metadata(dict_table_t *table) {
 
   mutex_enter(&dict_persist->mutex);
 
-  std::string *readmeta;
   uint64_t version;
-  readmeta = table_buffer->get(table->id, &version);
+  const auto readmeta = table_buffer->get(table->id, &version);
 
-  if (readmeta->length() != 0) {
+  if (!readmeta.empty()) {
     /* Persistent dynamic metadata of this table have changed
     recently, we need to update them to in-memory table */
     PersistentTableMetadata metadata(table->id, version);
 
-    dict_table_read_dynamic_metadata(
-        reinterpret_cast<const byte *>(readmeta->data()), readmeta->length(),
-        &metadata);
+    dict_table_read_dynamic_metadata(readmeta.data(), readmeta.size(),
+                                     &metadata);
 
     bool is_dirty = dict_table_apply_dynamic_metadata(table, &metadata);
 
@@ -4102,8 +4129,6 @@ void dict_table_load_dynamic_metadata(dict_table_t *table) {
   }
 
   mutex_exit(&dict_persist->mutex);
-
-  ut::delete_(readmeta);
 }
 
 /** Mark the dirty_status of a table as METADATA_DIRTY, and add it to the
@@ -5414,9 +5439,9 @@ void DDTableBuffer::truncate() {
 has to delete the returned std::string object by ut::delete_
 @param[in]      id      table id
 @param[out]     version table dynamic metadata version
-@return the metadata saved in a string object, if nothing, the
-string would be of length 0 */
-std::string *DDTableBuffer::get(table_id_t id, uint64_t *version) {
+@return the metadata saved in a vector object, if nothing, the
+vector would be empty */
+std::vector<byte> DDTableBuffer::get(table_id_t id, uint64_t *version) {
   btr_cur_t cursor;
   mtr_t mtr;
   ulint len;
@@ -5453,8 +5478,7 @@ std::string *DDTableBuffer::get(table_id_t id, uint64_t *version) {
     *version = 0;
   }
 
-  std::string *metadata = ut::new_withkey<std::string>(
-      UT_NEW_THIS_FILE_PSI_KEY, reinterpret_cast<const char *>(field), len);
+  std::vector<byte> metadata{field, field + len};
 
   mtr.commit();
 
@@ -5569,22 +5593,13 @@ ulint CorruptedIndexPersister::read(PersistentTableMetadata &metadata,
                                     bool *corrupt) const {
   const byte *end = buffer + size;
   ulint consumed = 0;
-  byte type;
   ulint num;
 
   *corrupt = false;
 
-  /* It should contain PM_INDEX_CORRUPTED and number at least */
-  if (size <= 2) {
+  /* It should contain a number at least */
+  if (size <= 1) {
     return (0);
-  }
-
-  type = *buffer++;
-  ++consumed;
-
-  if (type != PM_INDEX_CORRUPTED) {
-    *corrupt = true;
-    return (consumed);
   }
 
   num = mach_read_from_1(buffer);
@@ -5612,6 +5627,14 @@ ulint CorruptedIndexPersister::read(PersistentTableMetadata &metadata,
   return (consumed);
 }
 
+void CorruptedIndexPersister::aggregate(
+    PersistentTableMetadata &metadata,
+    const PersistentTableMetadata &new_entry) const {
+  for (auto id : new_entry.get_corrupted_indexes()) {
+    metadata.add_corrupted_index(id);
+  }
+}
+
 /** Write the autoinc counter of a table, we can pre-calculate
 the size by calling get_write_size()
 @param[in]      metadata        persistent metadata
@@ -5637,55 +5660,44 @@ ulint AutoIncPersister::write(const PersistentTableMetadata &metadata,
 }
 
 /** Read the autoinc counter from buffer, and store them to
-metadata object
+a metadata object
 @param[out]     metadata        metadata where we store the read data
 @param[in]      buffer          buffer to read
 @param[in]      size            size of buffer
 @param[out]     corrupt         true if we found something wrong in
-                                the buffer except incomplete buffer,
-                                otherwise false
+                                  the buffer except incomplete buffer,
+                                  otherwise false
 @return the bytes we read from the buffer if the buffer data
 is complete and we get everything, 0 if the buffer is incomplete */
 ulint AutoIncPersister::read(PersistentTableMetadata &metadata,
                              const byte *buffer, ulint size,
                              bool *corrupt) const {
-  const byte *end = buffer + size;
-  ulint consumed = 0;
-  byte type;
-  uint64_t autoinc;
-
   *corrupt = false;
 
-  /* It should contain PM_TABLE_AUTO_INC and the counter at least */
-  if (size < 2) {
-    return (0);
-  }
-
-  type = *buffer++;
-  ++consumed;
-
-  if (type != PM_TABLE_AUTO_INC) {
-    *corrupt = true;
-    return (consumed);
-  }
-
   const byte *start = buffer;
-  autoinc = mach_parse_u64_much_compressed(&start, end);
+  const auto autoinc = mach_parse_u64_much_compressed(&start, buffer + size);
 
   if (start == nullptr) {
     /* Just incomplete data, not corrupted */
     return (0);
   }
 
-  if (autoinc == 0) {
-    metadata.set_autoinc(autoinc);
-  } else {
-    metadata.set_autoinc_if_bigger(autoinc);
-  }
+  metadata.set_autoinc(autoinc);
 
-  consumed += start - buffer;
+  const ulint consumed = start - buffer;
   ut_ad(consumed <= size);
   return (consumed);
+}
+
+void AutoIncPersister::aggregate(
+    PersistentTableMetadata &metadata,
+    const PersistentTableMetadata &new_entry) const {
+  if (new_entry.get_version() > metadata.get_version()) {
+    metadata.set_autoinc(new_entry.get_autoinc());
+    metadata.set_version(new_entry.get_version());
+  } else if (new_entry.get_version() == metadata.get_version()) {
+    metadata.set_autoinc_if_bigger(new_entry.get_autoinc());
+  }
 }
 
 /** Destructor */

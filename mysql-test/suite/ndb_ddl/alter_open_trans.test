@@ -10,7 +10,7 @@ set @@global.ndb_schema_dist_lock_wait_timeout = 1;
 --disable_query_log
 call mtr.add_suppression("Failed to acquire exclusive metadata lock");
 call mtr.add_suppression("Failed to update table definition in DD");
-call mtr.add_suppression("NDB: Distribution of ALTER TABLE");
+call mtr.add_suppression("Distribution of ALTER TABLE");
 --enable_query_log
 
 # Trying to perform an alter on one mysqld
@@ -62,6 +62,7 @@ connection mysqld1;
 --error ER_TABLE_DEF_CHANGED
 select * from t1;
 show warnings;
+--error ER_TABLE_DEF_CHANGED
 select * from t1;
 drop table t1;
 

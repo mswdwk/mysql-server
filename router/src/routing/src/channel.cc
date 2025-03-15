@@ -1,16 +1,17 @@
 /*
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "channel.h"
 
+#include <algorithm>  // min
 #include <cassert>
 
 #include <openssl/bio.h>
@@ -234,17 +236,30 @@ stdx::expected<size_t, std::error_code> Channel::read_to_plain(size_t sz) {
   size_t bytes_read{};
   // decrypt from src-ssl into the ssl-plain-buf
   while (sz > 0) {
+    // read at most a SSL frame (16k) to avoid excessive resizes.
+    //
+    // Without the limitation, a 16Mbyte frame takes 150sec to transfer
+    // if CMAKE_BUILD_TYPE is Debug due to disabled optimizations:
+    //
+    //      | Debug    | RelWithDebInfo
+    //   1k |  2100ms  | 256ms
+    //  16k |  1966ms  | 219ms
+    // 256k | *6509ms* | 189ms
+    const size_t to_read = std::min(sz, static_cast<size_t>(16UL * 1024));
+
     auto dyn_buf = net::dynamic_buffer(plain_buf);
 
     // append to the plain buffer
-    const auto read_res = read(dyn_buf, sz);
+    const auto read_res = read(dyn_buf, to_read);
+
+    // sync the plain-view as the read() may have resized it.
+    view_sync_plain();
+
     if (read_res) {
       const size_t transferred = read_res.value();
 
       sz -= transferred;
       bytes_read += transferred;
-
-      view_sync_plain();
     } else {
       // read from client failed.
 

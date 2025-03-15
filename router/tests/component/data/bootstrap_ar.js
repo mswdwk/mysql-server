@@ -5,6 +5,10 @@ var options = {
   innodb_cluster_name: "mycluster",
 };
 
+if (mysqld.global.server_version === undefined) {
+  mysqld.global.server_version = "8.0.39";
+}
+
 var common_responses = common_stmts.prepare_statement_responses(
     [
       "router_set_session_options",
@@ -28,6 +32,7 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
       "router_insert_into_routers",
       "router_delete_old_accounts",
       "router_create_user_if_not_exists",
+      "router_check_auth_plugin",
       "router_grant_on_metadata_db",
       "router_grant_on_pfs_db",
       "router_grant_on_routers",
@@ -38,6 +43,7 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
     options);
 
 ({
+  handshake: {greeting: {server_version: mysqld.global.server_version}},
   stmts: function(stmt) {
     var res;
     if (common_responses.hasOwnProperty(stmt)) {

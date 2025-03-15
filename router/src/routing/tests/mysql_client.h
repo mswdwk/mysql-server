@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,6 +33,7 @@
 #include <mysql.h>
 
 #include "mysql/harness/stdx/expected.h"
+#include "mysql/harness/stdx/span.h"
 
 class MysqlError {
  public:
@@ -537,6 +539,14 @@ class MysqlClient {
     return {r};
   }
 
+  stdx::expected<unsigned int, MysqlError> warning_count() {
+    return mysql_warning_count(m_.get());
+  }
+
+  stdx::expected<unsigned int, MysqlError> server_status() {
+    return m_->server_status;
+  }
+
   /**
    * close a connection explicitly.
    */
@@ -796,23 +806,13 @@ class MysqlClient {
       MYSQL *m_;
     };
 
-    template <class T, class N>
-    typename std::enable_if<
-        std::conjunction<std::is_same<typename T::value_type, MYSQL_BIND>,
-                         std::is_same<decltype(std::declval<T>().data()),
-                                      typename T::value_type *>,
-                         std::is_same<typename N::value_type, const char *>,
-                         std::is_same<decltype(std::declval<N>().data()),
-                                      typename N::value_type *>>::value,
-        stdx::expected<void, MysqlError>>::type
-    bind_params(const T &params, const N &names) {
-      auto r = mysql_bind_param(m_, params.size(),
-                                const_cast<MYSQL_BIND *>(params.data()),
-                                const_cast<const char **>(names.data()));
+    stdx::expected<void, MysqlError> bind_params(
+        const stdx::span<MYSQL_BIND> &params,
+        const stdx::span<const char *> &names) {
+      auto err =
+          mysql_bind_param(m_, params.size(), params.data(), names.data());
 
-      if (r != 0) {
-        return stdx::make_unexpected(make_mysql_error_code(m_));
-      }
+      if (err) return stdx::make_unexpected(make_mysql_error_code(m_));
 
       return {};
     }
@@ -897,16 +897,9 @@ class MysqlClient {
     return {std::in_place, m_.get(), res};
   }
 
-  template <class T, class N>
-  typename std::enable_if<
-      std::conjunction<std::is_same<typename T::value_type, MYSQL_BIND>,
-                       std::is_same<decltype(std::declval<T>().data()),
-                                    typename T::value_type *>,
-                       std::is_same<typename N::value_type, const char *>,
-                       std::is_same<decltype(std::declval<N>().data()),
-                                    typename N::value_type *>>::value,
-      stdx::expected<Statement::Result, MysqlError>>::type
-  query(std::string_view stmt, const T &params, const N &names) {
+  stdx::expected<Statement::Result, MysqlError> query(
+      std::string_view stmt, const stdx::span<MYSQL_BIND> &params,
+      const stdx::span<const char *> &names) {
     Statement st(m_.get());
 
     const auto bind_res = st.bind_params(params, names);

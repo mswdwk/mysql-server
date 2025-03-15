@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -314,8 +315,7 @@ void row_upd_rec_sys_fields_in_recovery(rec_t *rec, page_zip_des_t *page_zip,
     byte *field;
     ulint len;
 
-    field =
-        const_cast<byte *>(rec_get_nth_field(nullptr, rec, offsets, pos, &len));
+    field = rec_get_nth_field(nullptr, rec, offsets, pos, &len);
     ut_ad(len == DATA_TRX_ID_LEN);
     trx_write_trx_id(field, trx_id);
     trx_write_roll_ptr(field + DATA_TRX_ID_LEN, roll_ptr);
@@ -1580,7 +1580,12 @@ bool row_upd_changes_ord_field_binary_func(dict_index_t *index,
         mem_heap_free(temp_heap);
       }
 
-      if (!mbr_equal_cmp(index->rtr_srs.get(), old_mbr, new_mbr)) {
+      /* We use mbr_equal_physically() because we would like to skip
+      Updation of Spatial Index only when the existing MBR in Spatial
+      Index matches physically to the MBR of the new geometry.
+      Else it might cause issues later during searching of record, because
+      cmp_geometry_field() does physical comparison.*/
+      if (!mbr_equal_physically(old_mbr, new_mbr)) {
         return (true);
       } else {
         continue;
@@ -1818,15 +1823,34 @@ static inline void row_upd_eval_new_vals(
   }
 }
 
+/** Copies the data pointed to by the new values for virtual fields to update
+@param[in,out]  update          an update vector */
+static void row_upd_dup_v_new_vals(const upd_t *update) {
+  ut_ad(update != nullptr);
+
+  for (ulint j = 0; j < upd_get_n_fields(update); j++) {
+    upd_field_t *upd_field = upd_get_nth_field(update, j);
+    if (upd_field->new_val.type.is_virtual()) {
+      if (dfield_is_multi_value(&upd_field->new_val)) {
+        dfield_multi_value_dup(&upd_field->new_val, update->heap);
+      } else {
+        dfield_dup(&upd_field->new_val, update->heap);
+      }
+    }
+  }
+}
+
 /** Stores to the heap the virtual columns that need for any indexes
 @param[in,out]  node            row update node
-@param[in]      update          an update vector if it is update
+@param[in,out]  update          an update vector if it is update
 @param[in]      thd             mysql thread handle
 @param[in,out]  mysql_table     mysql table object */
 static void row_upd_store_v_row(upd_node_t *node, const upd_t *update, THD *thd,
                                 TABLE *mysql_table) {
   mem_heap_t *heap = nullptr;
   dict_index_t *index = node->table->first_index();
+  bool new_val_v_cols_dup = false;
+  const ulint n_upd = update ? upd_get_n_fields(update) : 0;
 
   for (ulint col_no = 0; col_no < dict_table_get_n_v_cols(node->table);
        col_no++) {
@@ -1834,7 +1858,6 @@ static void row_upd_store_v_row(upd_node_t *node, const upd_t *update, THD *thd,
 
     if (col->m_col.ord_part) {
       dfield_t *dfield = dtuple_get_nth_v_field(node->row, col_no);
-      ulint n_upd = update ? upd_get_n_fields(update) : 0;
       ulint i = 0;
 
       /* Check if the value is already in update vector */
@@ -1874,6 +1897,10 @@ static void row_upd_store_v_row(upd_node_t *node, const upd_t *update, THD *thd,
               dfield_dup(dfield, node->heap);
             }
             if (dfield_is_null(dfield)) {
+              if (!new_val_v_cols_dup) {
+                row_upd_dup_v_new_vals(update);
+                new_val_v_cols_dup = true;
+              }
               innobase_get_computed_value(node->row, col, index, &heap,
                                           node->heap, nullptr, thd, mysql_table,
                                           nullptr, nullptr, nullptr);
@@ -2753,24 +2780,27 @@ static bool row_upd_check_autoinc_counter(const upd_node_t *node, mtr_t *mtr) {
 
 /** Updates a clustered index record of a row when the ordering fields do
  not change.
+ @param[in]      flags         undo logging and locking flags
+ @param[in]      node          row update node
+ @param[in]      index         clustered index
+ @param[in]      offsets       rec_get_offsets() on node->pcur
+ @param[in,out]  offsets_heap  memory heap, can be emptied
+ @param[in]      thr           query thread
+ @param[in]      mtr           mtr; gets committed here
  @return DB_SUCCESS if operation successfully completed, else error
  code or DB_LOCK_WAIT */
-[[nodiscard]] static dberr_t row_upd_clust_rec(
-    ulint flags,         /*!< in: undo logging and locking flags */
-    upd_node_t *node,    /*!< in: row update node */
-    dict_index_t *index, /*!< in: clustered index */
-    ulint *offsets,      /*!< in: rec_get_offsets() on node->pcur */
-    mem_heap_t **offsets_heap,
-    /*!< in/out: memory heap, can be emptied */
-    que_thr_t *thr, /*!< in: query thread */
-    mtr_t *mtr)     /*!< in: mtr; gets committed here */
-{
+[[nodiscard]] static dberr_t row_upd_clust_rec(ulint flags, upd_node_t *node,
+                                               dict_index_t *index,
+                                               ulint *offsets,
+                                               mem_heap_t **offsets_heap,
+                                               que_thr_t *thr, mtr_t *mtr) {
   mem_heap_t *heap = nullptr;
   big_rec_t *big_rec = nullptr;
   btr_pcur_t *pcur;
   btr_cur_t *btr_cur;
   dberr_t err = DB_SUCCESS;
   bool persist_autoinc = false;
+  bool is_old_or_new_rec_extern = false;
   const dtuple_t *rebuilt_old_pk = nullptr;
   trx_id_t trx_id = thr_get_trx(thr)->id;
   trx_t *trx = thr_get_trx(thr);
@@ -2788,6 +2818,7 @@ static bool row_upd_check_autoinc_counter(const upd_node_t *node, mtr_t *mtr) {
   ut_ad(rec_offs_validate(btr_cur_get_rec(btr_cur), index, offsets));
 
   if (dict_index_is_online_ddl(index)) {
+    is_old_or_new_rec_extern = rec_offs_any_extern(offsets);
     rebuilt_old_pk = row_log_table_get_pk(btr_cur_get_rec(btr_cur), index,
                                           offsets, nullptr, &heap);
     if (row_log_table_get_error(index) == DB_INDEX_CORRUPT) {
@@ -2878,9 +2909,19 @@ static bool row_upd_check_autoinc_counter(const upd_node_t *node, mtr_t *mtr) {
       dtuple_t *new_v_row = nullptr;
       dtuple_t *old_v_row = nullptr;
 
+      /* In case UPDATE modifies extern BLOB and makes it fit within record
+      after above update, we still need old virtual col */
+      is_old_or_new_rec_extern |= rec_offs_any_extern(offsets);
+
       if (!(node->cmpl_info & UPD_NODE_NO_ORD_CHANGE)) {
         new_v_row = node->upd_row;
         old_v_row = node->update->old_vrow;
+      } else if (is_old_or_new_rec_extern) {
+        /* Row log treats UPDATE on extern BLOB as DELETE + INSERT. This
+        requires virtual col info. Since no change in virtual col, new value is
+        same as old */
+        old_v_row = node->update->old_vrow;
+        new_v_row = old_v_row;
       }
 
       row_log_table_update(btr_cur_get_rec(btr_cur), index, offsets,

@@ -1,15 +1,16 @@
-# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -104,6 +105,8 @@ FUNCTION(FIND_SYSTEM_CURL ARG_CURL_INCLUDE_DIR)
   #  CURL_LIBRARIES      - List of libraries when using curl.
   #  CURL_FOUND          - True if curl found.
   #  CURL_VERSION_STRING - the version of curl found (since CMake 2.8.8)
+  #
+  #  Newer versions of cmake will also define the IMPORTED target CURL::libcurl
   FIND_PACKAGE(CURL)
   IF(CURL_FOUND AND CURL_LIBRARIES)
     SET(CURL_LIBRARY ${CURL_LIBRARIES} CACHE FILEPATH "Curl library")
@@ -125,12 +128,12 @@ FUNCTION(FIND_SYSTEM_CURL ARG_CURL_INCLUDE_DIR)
   ENDIF()
 ENDFUNCTION(FIND_SYSTEM_CURL)
 
-SET(CURL_VERSION_DIR "curl-7.88.1")
+SET(CURL_VERSION_DIR "curl-8.11.1")
 FUNCTION(MYSQL_USE_BUNDLED_CURL CURL_INCLUDE_DIR)
   SET(WITH_CURL "bundled" CACHE STRING "Bundled curl library")
   ADD_SUBDIRECTORY(extra/curl)
   SET(CURL_FOUND ON CACHE INTERNAL "")
-  SET(CURL_LIBRARY libcurl)
+  SET(CURL_LIBRARY libcurl) # libcurl is an alias for libcurl_static
   SET(CURL_INCLUDE_DIR
     ${CMAKE_SOURCE_DIR}/extra/curl/${CURL_VERSION_DIR}/include)
   SET(CURL_INCLUDE_DIR ${CURL_INCLUDE_DIR} PARENT_SCOPE)
@@ -246,12 +249,20 @@ FUNCTION(MYSQL_CHECK_CURL)
   MESSAGE(STATUS "CURL_INCLUDE_DIR = ${CURL_INCLUDE_DIR}")
   FIND_CURL_VERSION()
   ADD_LIBRARY(ext::curl ALIAS curl_interface)
+  # 3rd party projects may depend on this:
+  IF(NOT TARGET CURL::libcurl)
+    ADD_LIBRARY(CURL::libcurl ALIAS curl_interface)
+  ENDIF()
   # Downgrade errors to warnings
   # We could instead do INTERFACE_COMPILE_DEFINITIONS CURL_DISABLE_DEPRECATION
   # That would silence curl warnings completely.
   IF(MY_COMPILER_IS_GNU AND CURL_VERSION VERSION_GREATER "7.86")
     SET_TARGET_PROPERTIES(curl_interface PROPERTIES INTERFACE_COMPILE_OPTIONS
       "-Wno-error=deprecated-declarations")
+  ENDIF()
+  IF(WIN32_CLANG)
+    SET_TARGET_PROPERTIES(curl_interface PROPERTIES INTERFACE_COMPILE_DEFINITIONS
+      CURL_DISABLE_DEPRECATION)
   ENDIF()
 
 ENDFUNCTION(MYSQL_CHECK_CURL)

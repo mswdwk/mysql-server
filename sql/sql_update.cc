@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -792,7 +793,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         if (thd->killed && !error)  // Aborted
           error = 1;                /* purecov: inspected */
         limit = tmp_limit;
-        end_semi_consistent_read.rollback();
+        end_semi_consistent_read.reset();
         if (used_index < MAX_KEY && covering_keys_for_cond.is_set(used_index))
           table->set_keyread(false);
         table->file->ha_index_or_rnd_end();
@@ -1067,7 +1068,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         break;
       }
     }
-    end_semi_consistent_read.rollback();
+    end_semi_consistent_read.reset();
 
     dup_key_found = 0;
     /*
@@ -1200,7 +1201,7 @@ static TABLE *GetOutermostTable(const JOIN *join) {
   // The old optimizer can usually find it in the access path too, except if the
   // outermost table is a const table, since const tables may not be visible in
   // the access path tree.
-  if (!join->thd->lex->using_hypergraph_optimizer) {
+  if (!join->thd->lex->using_hypergraph_optimizer()) {
     assert(join->qep_tab != nullptr);
     return join->qep_tab[0].table();
   }
@@ -1545,7 +1546,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   // enables it to perform optimizations like sort avoidance and semi-join
   // flattening even if features specific to single-table UPDATE (that is, ORDER
   // BY and LIMIT) are used.
-  if (lex->using_hypergraph_optimizer) {
+  if (lex->using_hypergraph_optimizer()) {
     multitable = true;
   }
 
@@ -1748,10 +1749,11 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   /* @todo: downgrade the metadata locks here. */
 
   /*
-    Syntax rule for multi-table update prevents these constructs.
-    But they are possible for single-table UPDATE against multi-table view.
+    ORDER BY and LIMIT is only allowed for single table update, so check. Even
+    through it looks syntactically like a single table update, it may still be
+    a multi-table update hidden if we update a multi-table view.
   */
-  if (is_single_table_syntax && table_list->is_multiple_tables()) {
+  if (!is_single_table_syntax || table_list->is_multiple_tables()) {
     if (select->order_list.elements) {
       my_error(ER_WRONG_USAGE, MYF(0), "UPDATE", "ORDER BY");
       return true;
@@ -1780,6 +1782,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   Opt_trace_array trace_steps(trace, "steps");
   opt_trace_print_expanded_query(thd, select, &trace_wrapper);
 
+  select->original_tables_map = select->all_tables_map();
   if (select->has_sj_candidates() && select->flatten_subqueries(thd))
     return true; /* purecov: inspected */
 
@@ -2997,7 +3000,7 @@ table_map GetImmediateUpdateTable(const JOIN *join, bool single_target) {
 
   // The hypergraph optimizer determines the immediate update tables during
   // planning, not after planning.
-  assert(!join->thd->lex->using_hypergraph_optimizer);
+  assert(!join->thd->lex->using_hypergraph_optimizer());
 
   // In some cases, rows may be updated immediately as they are read from the
   // outermost table in the join.
@@ -3070,7 +3073,7 @@ unique_ptr_destroy_only<RowIterator> Query_result_update::create_iterator(
       update_tables, tmp_tables, copy_field, unupdated_check_opt_tables,
       update_operations, fields_for_table, values_for_table,
       // The old optimizer does not use hash join in UPDATE statements.
-      thd->lex->using_hypergraph_optimizer
+      thd->lex->using_hypergraph_optimizer()
           ? GetHashJoinTables(unit->root_access_path())
           : 0);
 }

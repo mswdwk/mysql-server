@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -1358,7 +1359,7 @@ my_decimal *Item_json_func::val_decimal(my_decimal *decimal_value) {
 */
 template <typename T, typename... Args>
 static bool create_scalar(Json_scalar_holder *scalar, Json_dom_ptr *dom,
-                          Args &&... args) {
+                          Args &&...args) {
   if (scalar != nullptr) {
     scalar->emplace<T>(std::forward<Args>(args)...);
     return false;
@@ -5191,6 +5192,8 @@ String *Item_func_json_value::extract_string_value(String *buffer) {
   buffer->length(0);
   if (wr.to_string(buffer, false, func_name(), JsonDocumentDefaultDepthHandler))
     return error_str();
+
+  if (buffer->is_empty()) return make_empty_result();
 
   unsigned conversion_errors = 0;
   if (!my_charset_same(collation.collation, buffer->charset())) {

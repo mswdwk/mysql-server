@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -46,8 +47,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 
 #include <list>
-#include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 class MetadataRecover;
 class PersistentTableMetadata;
@@ -135,12 +136,11 @@ segment or garbage
 @param[in]      len                     buffer length
 @param[in]      start_lsn               buffer start lsn
 @param[out]     group_scanned_lsn       scanning succeeded up to this lsn
-@param[out]     err  error code as returned by recv_init_crash_recovery().
 @retval	true  if limit_lsn has been reached, or not able to scan any
 more in this log group
 @retval false   otherwise */
 bool meb_scan_log_recs(size_t available_memory, const byte *buf, size_t len,
-                       lsn_t start_lsn, lsn_t *group_scanned_lsn, dberr_t &err);
+                       lsn_t start_lsn, lsn_t *group_scanned_lsn);
 
 /** Check the 4-byte checksum to the trailer checksum field of a log
 block.
@@ -398,7 +398,7 @@ struct recv_sys_t {
     Pages m_pages;
   };
 
-  using Missing_Ids = std::set<space_id_t>;
+  using Missing_Ids = std::unordered_set<space_id_t>;
 
   using Spaces = std::unordered_map<space_id_t, Space, std::hash<space_id_t>,
                                     std::equal_to<space_id_t>>;

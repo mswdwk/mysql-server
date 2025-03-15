@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -329,9 +330,8 @@ class Pages {
 
   /** Recover double write buffer pages
   @param[in]  space  Tablespace pages to recover, if set to nullptr then try
-                     and recovery all.
-  @return DB_SUCCESS on success, error code on failure. */
-  dberr_t recover(fil_space_t *space) noexcept;
+                     and recovery all. */
+  void recover(fil_space_t *space) noexcept;
 
   /** Check if some pages could be restored because of missing
   tablespace IDs */
@@ -347,9 +347,8 @@ class Pages {
   space_id, page_id, LSN is logged. So we abort the server. It is expected
   that the user restores from backup
   @param[in]   space           Tablespace pages to check in reduced
-  dblwr, if set to nullptr then try and recovery all.
-  @return DB_SUCCESS on success, others on failure */
-  dberr_t reduced_recover(fil_space_t *space) noexcept;
+  dblwr, if set to nullptr then try and recovery all. */
+  void reduced_recover(fil_space_t *space) noexcept;
 
   /** Recovered doublewrite buffer page frames */
   Buffers m_pages;
@@ -2023,7 +2022,7 @@ class Reduced_batch_deserializer {
   dberr_t deserialize(F &f) {
     auto page = m_buf->begin();
     for (uint32_t i = 0; i < m_n_pages; ++i) {
-      if (is_zeroes(page)) {
+      if (ut::is_zeros(page, REDUCED_BATCH_PAGE_SIZE)) {
         page += REDUCED_BATCH_PAGE_SIZE;
         continue;
       }
@@ -2104,17 +2103,6 @@ class Reduced_batch_deserializer {
 
     ut_ad(static_cast<uint32_t>(page_data - page_start) ==
           (expected_entries * REDUCED_ENTRY_SIZE));
-  }
-
-  /** @return true if dblwr page is an all-zero page
-  @param[in]   page    dblwr page in batch file (.bdblwr) */
-  bool is_zeroes(const byte *page) {
-    for (ulint i = 0; i < REDUCED_BATCH_PAGE_SIZE; i++) {
-      if (page[i] != 0) {
-        return (false);
-      }
-    }
-    return (true);
   }
 
  private:
@@ -2623,9 +2611,9 @@ void dblwr::write_complete(buf_page_t *bpage, buf_flush_t flush_type) noexcept {
   Double_write::write_complete(bpage, flush_type);
 }
 
-dberr_t dblwr::recv::recover(recv::Pages *pages, fil_space_t *space) noexcept {
+void dblwr::recv::recover(recv::Pages *pages, fil_space_t *space) noexcept {
 #ifndef UNIV_HOTBACKUP
-  return pages->recover(space);
+  pages->recover(space);
 #endif /* UNIV_HOTBACKUP */
 }
 
@@ -2705,9 +2693,8 @@ static dberr_t dblwr_file_open(const std::string &dir_name, int id,
   }
 
   bool success;
-  file.m_pfs =
-      os_file_create(innodb_dblwr_file_key, file.m_name.c_str(), mode,
-                     OS_FILE_NORMAL, file_type, srv_read_only_mode, &success);
+  file.m_pfs = os_file_create(innodb_dblwr_file_key, file.m_name.c_str(), mode,
+                              file_type, srv_read_only_mode, &success);
 
   if (!success) {
     ib::error(ER_IB_MSG_DBLWR_1293, file.m_name.c_str());
@@ -3122,9 +3109,8 @@ bool dblwr::recv::Pages::dblwr_recover_page(page_no_t dblwr_page_no,
   shouldn't restore the old/stale page from regular dblwr. We should
   abort */
   if (found && reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
-    ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
-              page_id.space(), page_id.page_no());
-    return (false);
+    ib::fatal(UT_LOCATION_HERE, ER_REDUCED_DBLWR_PAGE_FOUND,
+              space->files.front().name, page_id.space(), page_id.page_no());
   }
 
   /* Recovered data file pages are written out as uncompressed. */
@@ -3159,14 +3145,14 @@ void dblwr::force_flush_all() noexcept {
 
 #endif /* !UNIV_HOTBACKUP */
 
-dberr_t recv::Pages::recover(fil_space_t *space) noexcept {
+void recv::Pages::recover(fil_space_t *space) noexcept {
 #ifndef UNIV_HOTBACKUP
   /* For cloned database double write pages should be ignored. However,
   given the control flow, we read the pages in anyway but don't recover
   from the pages we read in. */
 
   if (!dblwr::is_enabled() || recv_sys->is_cloned_db) {
-    return DB_SUCCESS;
+    return;
   }
 
   auto recover_all = (space == nullptr);
@@ -3199,17 +3185,12 @@ dberr_t recv::Pages::recover(fil_space_t *space) noexcept {
         dblwr_recover_page(page->m_no, space, page_no, page->m_buffer.begin());
   }
 
-  dberr_t err = reduced_recover(space);
-  if (err != DB_SUCCESS) {
-    return (err);
-  }
-
+  reduced_recover(space);
   fil_flush_file_spaces();
 #endif /* !UNIV_HOTBACKUP */
-  return DB_SUCCESS;
 }
 
-dberr_t recv::Pages::reduced_recover(fil_space_t *space) noexcept {
+void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
 #ifndef UNIV_HOTBACKUP
   auto recover_all = (space == nullptr);
 
@@ -3238,17 +3219,10 @@ dberr_t recv::Pages::reduced_recover(fil_space_t *space) noexcept {
         is_actual_page_corrupted(space, page_id);
 
     if (is_corrupted) {
-      const byte *page = find(page_id);
-      if (page != nullptr) {
-        if (!is_recovered(page_id)) {
-          ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
-                    page_id.space(), page_id.page_no());
-          return (DB_CORRUPTION);
-        }
-      } else {
-        ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
-                  page_id.space(), page_id.page_no());
-        return (DB_CORRUPTION);
+      if (find(page_id) == nullptr || !is_recovered(page_id)) {
+        ib::fatal(UT_LOCATION_HERE, ER_REDUCED_DBLWR_PAGE_FOUND,
+                  space->files.front().name, page_id.space(),
+                  page_id.page_no());
       }
     }
 
@@ -3260,14 +3234,13 @@ dberr_t recv::Pages::reduced_recover(fil_space_t *space) noexcept {
 
       if (!is_recovered(page_id) && found && reduced_lsn != LSN_MAX &&
           reduced_lsn != 0) {
-        ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
-                  page_id.space(), page_id.page_no());
-        return (DB_CORRUPTION);
+        ib::fatal(UT_LOCATION_HERE, ER_REDUCED_DBLWR_PAGE_FOUND,
+                  space->files.front().name, page_id.space(),
+                  page_id.page_no());
       }
     }
   }
 #endif /* !UNIV_HOTBACKUP */
-  return (DB_SUCCESS);
 }
 
 const byte *recv::Pages::find(const page_id_t &page_id) const noexcept {

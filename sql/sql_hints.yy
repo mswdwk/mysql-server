@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -62,7 +63,7 @@ static bool parse_int(longlong *to, const char *from, size_t from_length)
 
 %}
 
-%pure-parser
+%define api.pure
 
 %parse-param { class THD *thd }
 %parse-param { class Hint_scanner *scanner }
@@ -257,7 +258,7 @@ max_execution_time_hint:
 
 
 opt_hint_param_table_list:
-          /* empty */ { $$.init(thd->mem_root); }
+          %empty { $$.init(thd->mem_root); }
         | hint_param_table_list
         ;
 
@@ -277,7 +278,7 @@ hint_param_table_list:
         ;
 
 opt_hint_param_table_list_empty_qb:
-          /* empty */ { $$.init(thd->mem_root); }
+          %empty { $$.init(thd->mem_root); }
         | hint_param_table_list_empty_qb
         ;
 
@@ -297,7 +298,7 @@ hint_param_table_list_empty_qb:
         ;
 
 opt_hint_param_index_list:
-          /* empty */ { $$.init(thd->mem_root); }
+          %empty { $$.init(thd->mem_root); }
         | hint_param_index_list
         ;
 
@@ -346,7 +347,7 @@ hint_param_table_ext:
         ;
 
 opt_qb_name:
-          /* empty */ { $$= NULL_CSTR; }
+          %empty { $$= NULL_CSTR; }
         | HINT_ARG_QB_NAME
         ;
 
@@ -423,7 +424,7 @@ qb_level_hint:
           ;
 
 semijoin_strategies:
-          /* empty */ { $$= 0; }
+          %empty { $$= 0; }
 	| semijoin_strategy
           {
             $$= $1;

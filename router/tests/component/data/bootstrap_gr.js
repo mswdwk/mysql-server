@@ -19,6 +19,21 @@ if (mysqld.global.gr_id === undefined) {
   mysqld.global.gr_id = "cluster-specific-id";
 }
 
+if (mysqld.global.server_version === undefined) {
+  // Let's keep the default server version as some known compatible version.
+  // If there is a need to some specific compatibility checks, this should be
+  // overwritten from the test.
+  mysqld.global.server_version = "8.0.39";
+}
+
+if (mysqld.global.last_insert_id === undefined) {
+  mysqld.global.last_insert_id = 1;
+}
+
+if (mysqld.global.account_user_pattern === undefined) {
+  mysqld.global.account_user_pattern = "mysql_router1_[0-9a-z]{7}";
+}
+
 var options = {
   metadata_schema_version: mysqld.global.metadata_version,
   cluster_type: "gr",
@@ -26,6 +41,9 @@ var options = {
   clusterset_present: 0,
   innodb_cluster_name: mysqld.global.cluster_name,
   innodb_cluster_instances: mysqld.global.innodb_cluster_instances,
+  last_insert_id: mysqld.global.last_insert_id,
+  account_user_pattern:
+      "mysql_router" + mysqld.global.last_insert_id + "_[0-9a-z]{7}",
 };
 
 var common_responses = common_stmts.prepare_statement_responses(
@@ -60,6 +78,7 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
     [
       "router_insert_into_routers",
       "router_create_user_if_not_exists",
+      "router_check_auth_plugin",
       "router_grant_on_metadata_db",
       "router_grant_on_pfs_db",
       "router_grant_on_routers",
@@ -74,7 +93,8 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
     auth: {
       username: "root",
       password: "fake-pass",
-    }
+    },
+    greeting: {server_version: mysqld.global.server_version}
   },
   stmts: function(stmt) {
     var res;

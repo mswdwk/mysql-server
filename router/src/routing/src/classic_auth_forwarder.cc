@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -314,7 +315,8 @@ stdx::expected<Processor::Result, std::error_code> AuthForwarder::init() {
         connection(), initial_auth_method_data, true));
   } else if (auth_method_name == AuthCachingSha2Password::kName) {
     connection()->push_processor(std::make_unique<AuthCachingSha2Forwarder>(
-        connection(), initial_auth_method_data, true));
+        connection(), initial_auth_method_data, true,
+        client_requested_full_auth_));
   } else if (auth_method_name == AuthNativePassword::kName) {
     connection()->push_processor(std::make_unique<AuthNativeForwarder>(
         connection(), initial_auth_method_data, true));
@@ -350,8 +352,6 @@ AuthForwarder::auth_method_switch() {
 
   src_protocol->auth_method_name(auth_method_name);
   src_protocol->auth_method_data(auth_method_data);
-  dst_protocol->auth_method_name(auth_method_name);
-  dst_protocol->auth_method_data(auth_method_data);
 
   if (auto &tr = tracer()) {
     tr.trace(
@@ -362,38 +362,54 @@ AuthForwarder::auth_method_switch() {
   discard_current_msg(src_channel, src_protocol);
 
   if (auth_method_name == AuthSha256Password::kName) {
+    dst_protocol->auth_method_name(auth_method_name);
+    dst_protocol->auth_method_data(auth_method_data);
+
     if (dst_protocol->password().has_value()) {
       connection()->push_processor(std::make_unique<AuthSha256Sender>(
           connection(), auth_method_data, dst_protocol->password().value()));
     } else {
       connection()->push_processor(std::make_unique<AuthSha256Forwarder>(
-          connection(), auth_method_data));
+          connection(), auth_method_data, false));
     }
   } else if (auth_method_name == AuthCachingSha2Password::kName) {
+    dst_protocol->auth_method_name(auth_method_name);
+    dst_protocol->auth_method_data(auth_method_data);
+
     if (dst_protocol->password().has_value()) {
       connection()->push_processor(std::make_unique<AuthCachingSha2Sender>(
           connection(), auth_method_data, dst_protocol->password().value()));
     } else {
+      // trigger a switch
       connection()->push_processor(std::make_unique<AuthCachingSha2Forwarder>(
-          connection(), auth_method_data));
+          connection(), auth_method_data, false));
     }
   } else if (auth_method_name == AuthNativePassword::kName) {
     if (dst_protocol->password().has_value()) {
+      dst_protocol->auth_method_name(auth_method_name);
+      dst_protocol->auth_method_data(auth_method_data);
+
       connection()->push_processor(std::make_unique<AuthNativeSender>(
           connection(), auth_method_data, dst_protocol->password().value()));
     } else {
       connection()->push_processor(std::make_unique<AuthNativeForwarder>(
-          connection(), auth_method_data));
+          connection(), auth_method_data, false));
     }
   } else if (auth_method_name == AuthCleartextPassword::kName) {
+    dst_protocol->auth_method_name(auth_method_name);
+    dst_protocol->auth_method_data(auth_method_data);
+
     if (dst_protocol->password().has_value()) {
       connection()->push_processor(std::make_unique<AuthCleartextSender>(
           connection(), auth_method_data, dst_protocol->password().value()));
     } else {
       connection()->push_processor(std::make_unique<AuthCleartextForwarder>(
-          connection(), auth_method_data));
+          connection(), auth_method_data, false));
     }
   } else {
+    dst_protocol->auth_method_name(auth_method_name);
+    dst_protocol->auth_method_data(auth_method_data);
+
     connection()->push_processor(std::make_unique<AuthGenericForwarder>(
         connection(), auth_method_name, auth_method_data));
   }

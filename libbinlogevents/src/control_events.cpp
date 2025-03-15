@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -363,12 +364,6 @@ Transaction_payload_event::Transaction_payload_event(const char *payload,
       m_compression_type((transaction::compression::type)compression_type),
       m_uncompressed_size(uncompressed_size) {}
 
-Transaction_payload_event::Transaction_payload_event(const char *payload,
-                                                     uint64_t payload_size)
-    : Transaction_payload_event(payload, payload_size,
-                                transaction::compression::type::NONE,
-                                payload_size) {}
-
 Transaction_payload_event::~Transaction_payload_event() = default;
 
 Transaction_payload_event::Transaction_payload_event(
@@ -403,6 +398,11 @@ std::string Transaction_payload_event::to_string() const {
     oss << "\tuncompressed_size=" << m_uncompressed_size;
 
   return oss.str();
+}
+
+void Transaction_payload_event::set_payload(
+    Buffer_sequence_view_t *buffer_sequence_view) {
+  m_buffer_sequence_view = buffer_sequence_view;
 }
 
 #ifndef HAVE_MYSYS

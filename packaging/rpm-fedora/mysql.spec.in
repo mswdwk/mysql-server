@@ -1,15 +1,16 @@
-# Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -68,7 +69,7 @@ Source1:        @BOOST_DOWNLOAD_URL@
 URL:            http://www.mysql.com/
 Packager:       MySQL Release Engineering <mysql-build@oss.oracle.com>
 Vendor:         %{mysql_vendor}
-BuildRequires:  bison >= 2.1
+BuildRequires:  bison >= 3.0.4
 BuildRequires:  cmake
 BuildRequires:  cyrus-sasl-devel
 BuildRequires:  elfutils
@@ -83,6 +84,9 @@ BuildRequires:  ncurses-devel
 BuildRequires:  numactl-devel
 BuildRequires:  openldap-devel
 BuildRequires:  openssl-devel
+%if 0%{?fedora} > 40
+BuildRequires:  openssl-devel-engine
+%endif
 BuildRequires:  patchelf
 BuildRequires:  perl
 BuildRequires:  perl(Carp)
@@ -268,6 +272,7 @@ Obsoletes:      mysql-community-common < %{version}-%{release}
 Obsoletes:      mariadb-config
 Obsoletes:      community-mysql-common < %{version}-%{release}
 Obsoletes:      community-mysql-errmsg < %{version}-%{release}
+Obsoletes:      mysql-errmsg < %{version}-%{release}
 Obsoletes:      mysql-common < %{version}-%{release}
 Provides:       mysql-common = %{version}-%{release}
 Provides:       mysql-common%{?_isa} = %{version}-%{release}
@@ -477,15 +482,11 @@ data.
 Summary:        MySQL Cluster Connector for Java
 %description    java
 This package contains MySQL Cluster Connector for Java, which includes
-ClusterJ and ClusterJPA, a plugin for use with OpenJPA.
+ClusterJ.
 
 ClusterJ is a high level database API that is similar in style and
 concept to object-relational mapping persistence frameworks such as
 Hibernate and JPA.
-
-ClusterJPA is an OpenJPA implementation for MySQL Cluster that
-attempts to offer the best possible performance by leveraging the
-strengths of both ClusterJ and JDBC
 
 %endif # cluster
 
@@ -508,7 +509,7 @@ mkdir debug
 (
   cd debug
   # Attempt to remove any optimisation flags from the debug build
-  optflags=$(echo "%{optflags}" | sed -e 's/-O2 / /' -e 's/-Wp,-D_FORTIFY_SOURCE=2/ /' -e 's/%{_lto_cflags}/ /')
+  optflags=$(echo "%{optflags}" | sed -e 's/-O2 / /' -e 's/-Wp,-U_FORTIFY_SOURCE,-D_FORTIFY_SOURCE=[0-9]/ /' -e 's/%{_lto_cflags}/ /')
   cmake ../%{src_dir} \
            -DBUILD_CONFIG=mysql_release \
            -DINSTALL_LAYOUT=RPM \
@@ -519,6 +520,7 @@ mkdir debug
            -DWITH_CURL=system \
            -DWITH_FIDO=system \
            -DWITH_MECAB=system \
+           -DWITH_ZLIB=system \
            -DCMAKE_C_FLAGS="$optflags" \
            -DCMAKE_CXX_FLAGS="$optflags" \
            -DUSE_LD_LLD=0 \
@@ -541,7 +543,7 @@ mkdir debug
            -DCOMPILATION_COMMENT="%{compilation_comment_debug}" \
            -DCOMPILATION_COMMENT_SERVER="%{compilation_comment_server_debug}" \
            -DMYSQL_SERVER_SUFFIX="%{?server_suffix}"
-  echo BEGIN_DEBUG_CONFIG ; egrep '^#define' include/config.h ; echo END_DEBUG_CONFIG
+  echo BEGIN_DEBUG_CONFIG ; grep -E '^#define' include/my_config.h ; echo END_DEBUG_CONFIG
   make %{?_smp_mflags} VERBOSE=1
 )
 
@@ -558,6 +560,7 @@ mkdir release
            -DWITH_CURL=system \
            -DWITH_FIDO=system \
            -DWITH_MECAB=system \
+           -DWITH_ZLIB=system \
            -DCMAKE_C_FLAGS="%{optflags}" \
            -DCMAKE_CXX_FLAGS="%{optflags}" \
            -DUSE_LD_LLD=0 \
@@ -580,7 +583,7 @@ mkdir release
            -DCOMPILATION_COMMENT="%{compilation_comment_release}" \
            -DCOMPILATION_COMMENT_SERVER="%{compilation_comment_server_release}" \
            -DMYSQL_SERVER_SUFFIX="%{?server_suffix}"
-  echo BEGIN_NORMAL_CONFIG ; egrep '^#define' include/config.h ; echo END_NORMAL_CONFIG
+  echo BEGIN_NORMAL_CONFIG ; grep -E '^#define' include/my_config.h ; echo END_NORMAL_CONFIG
   make %{?_smp_mflags} VERBOSE=1
 )
 
@@ -634,8 +637,7 @@ fi
 %check
 %if 0%{?runselftest} || 0%{?with_unittests}
 pushd release
-export CTEST_OUTPUT_ON_FAILURE=1
-make test || true
+make test-unit || true
 %endif
 %if 0%{?runselftest}
 export MTR_BUILD_THREAD=auto
@@ -656,7 +658,9 @@ rm -r $(readlink var) var
 %post server
 [ -e /var/log/mysqld.log ] || install -m0640 -omysql -gmysql /dev/null /var/log/mysqld.log >/dev/null 2>&1 || :
 %systemd_post mysqld.service
-/usr/bin/systemctl enable mysqld >/dev/null 2>&1 || :
+if [ $1 -eq 1 ]; then
+    /usr/bin/systemctl enable mysqld >/dev/null 2>&1 || :
+fi
 
 %preun server
 %systemd_preun mysqld.service
@@ -724,8 +728,8 @@ rm -r $(readlink var) var
 %attr(755, root, root) %{_sbindir}/mysqld
 
 %dir %{_libdir}/mysql/private
-%attr(755, root, root) %{_libdir}/mysql/private/libprotobuf-lite.so.3.19.4
-%attr(755, root, root) %{_libdir}/mysql/private/libprotobuf.so.3.19.4
+%attr(755, root, root) %{_libdir}/mysql/private/libprotobuf-lite.so.24.4.0
+%attr(755, root, root) %{_libdir}/mysql/private/libprotobuf.so.24.4.0
 
 %dir %{_libdir}/mysql/plugin
 %attr(755, root, root) %{_libdir}/mysql/plugin/adt_null.so
@@ -847,9 +851,12 @@ rm -r $(readlink var) var
 %files icu-data-files
 %defattr(-, root, root, -)
 %doc %{?license_files_server}
-%dir %attr(755, root, root) %{_libdir}/mysql/private/icudt69l
-%{_libdir}/mysql/private/icudt69l/unames.icu
-%{_libdir}/mysql/private/icudt69l/brkitr
+%dir %attr(755, root, root) %{_libdir}/mysql/private/icudt73l
+%{_libdir}/mysql/private/icudt73l/cnvalias.icu
+%{_libdir}/mysql/private/icudt73l/uemoji.icu
+%{_libdir}/mysql/private/icudt73l/ulayout.icu
+%{_libdir}/mysql/private/icudt73l/unames.icu
+%{_libdir}/mysql/private/icudt73l/brkitr
 
 %files client
 %doc %{?license_files_server}
@@ -1220,7 +1227,7 @@ rm -r $(readlink var) var
 %{_libdir}/mysqlrouter/private/libmysqlrouter_metadata_cache.so.*
 %{_libdir}/mysqlrouter/private/libmysqlrouter_mysqlxmessages.so.*
 %{_libdir}/mysqlrouter/private/libmysqlrouter_routing.so.*
-%{_libdir}/mysqlrouter/private/libprotobuf-lite.so.3.19.4
+%{_libdir}/mysqlrouter/private/libprotobuf-lite.so.24.4.0
 %dir %{_libdir}/mysqlrouter
 %dir %{_libdir}/mysqlrouter/private
 %{_libdir}/mysqlrouter/*.so

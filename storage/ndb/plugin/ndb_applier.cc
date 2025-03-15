@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -94,7 +95,7 @@ bool Ndb_applier::init() {
   // Create and open the util for working with ndb_apply_status table
   m_apply_status = std::make_unique<Ndb_apply_status_table>(m_thd_ndb);
   if (!m_apply_status->open()) {
-    ndb_log_error("NDB Replica: Failed to open 'mysql.ndb_apply_status' table");
+    ndb_log_error("Replica: Failed to open 'mysql.ndb_apply_status' table");
     return false;
   }
   return true;
@@ -141,14 +142,14 @@ bool Thd_ndb::init_applier() {
   std::vector<Uint32> existing_server_ids;
   Ndb_apply_status_table apply_status(this);
   if (!apply_status.open()) {
-    ndb_log_error("NDB Replica: Failed to open 'mysql.ndb_apply_status' table");
+    ndb_log_error("Replica: Failed to open 'mysql.ndb_apply_status' table");
     return false;
   }
   if (!apply_status.load_state(own_server_id, ignore_server_ids,
                                source_server_id, highest_applied_epoch,
                                source_epoch, existing_server_ids)) {
     ndb_log_error(
-        "NDB Replica: Failed to load state for channel: '%s', server_id: %d",
+        "Replica: Failed to load state for channel: '%s', server_id: %d",
         channel_name, own_server_id);
     return false;
   }
@@ -159,7 +160,7 @@ bool Thd_ndb::init_applier() {
   // first call to initialize_max_rep_epoch() will be saved in the channel state
   if (channel->initialize_max_rep_epoch(highest_applied_epoch)) {
     ndb_log_info(
-        "NDB Replica: MaxReplicatedEpoch set to %llu (%u/%u) at "
+        "Replica: MaxReplicatedEpoch set to %llu (%u/%u) at "
         "Replica start",
         highest_applied_epoch, (Uint32)(highest_applied_epoch >> 32),
         (Uint32)(highest_applied_epoch & 0xffffffff));
@@ -170,7 +171,7 @@ bool Thd_ndb::init_applier() {
       source_epoch, ignore_server_ids, num_workers, existing_server_ids);
 
   if (!m_applier->init()) {
-    ndb_log_error("NDB Replica: Failed to init Applier for channel: '%s'",
+    ndb_log_error("Replica: Failed to init Applier for channel: '%s'",
                   channel_name);
   }
 
@@ -270,7 +271,7 @@ bool Ndb_applier::verify_next_epoch(Uint64 next_epoch) const {
     if (next_epoch < current_epoch) {
       const auto positions = get_log_positions();
       ndb_log_warning(
-          "NDB Replica: At SQL thread start "
+          "Replica: At SQL thread start "
           "applying epoch %llu/%llu (%llu) from "
           "Source ServerId %u which is lower than "
           "previously applied epoch %llu/%llu (%llu).  "
@@ -310,7 +311,7 @@ bool Ndb_applier::verify_next_epoch(Uint64 next_epoch) const {
     /* Should never happen */
     const auto positions = get_log_positions();
     ndb_log_error(
-        "NDB Replica: SQL thread stopped as "
+        "Replica: SQL thread stopped as "
         "applying epoch %llu/%llu (%llu) from "
         "Source ServerId %u which is lower than "
         "previously applied epoch %llu/%llu (%llu).  "
@@ -331,7 +332,7 @@ bool Ndb_applier::verify_next_epoch(Uint64 next_epoch) const {
       /* This epoch is committed already, why are we replaying it? */
       const auto positions = get_log_positions();
       ndb_log_error(
-          "NDB Replica: SQL thread stopped as attempted to "
+          "Replica: SQL thread stopped as attempted to "
           "reapply already committed epoch %llu/%llu (%llu) "
           "from server id %u.  "
           "Group Source Log : %s  "
@@ -364,7 +365,7 @@ bool Ndb_applier::verify_next_epoch(Uint64 next_epoch) const {
   if (opt_ndb_applier_allow_skip_epoch) {
     const auto positions = get_log_positions();
     ndb_log_warning(
-        "NDB Replica: SQL thread attempting to "
+        "Replica: SQL thread attempting to "
         "apply new epoch %llu/%llu (%llu) while lower "
         "received epoch %llu/%llu (%llu) has not been "
         "committed.  Source Server id : %u.  "
@@ -381,7 +382,7 @@ bool Ndb_applier::verify_next_epoch(Uint64 next_epoch) const {
 
   const auto positions = get_log_positions();
   ndb_log_error(
-      "NDB Replica: SQL thread stopped as attempting to "
+      "Replica: SQL thread stopped as attempting to "
       "apply new epoch %llu/%llu (%llu) while lower "
       "received epoch %llu/%llu (%llu) has not been "
       "committed.  Source Server id : %u.  "

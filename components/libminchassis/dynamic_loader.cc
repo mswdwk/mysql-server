@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -697,7 +698,7 @@ bool mysql_dynamic_loader_imp::load_do_load_component_by_scheme(
   bool res = mysql_dynamic_loader_imp::load_do_collect_services_provided(
       loaded_components);
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }
@@ -826,7 +827,7 @@ bool mysql_dynamic_loader_imp::load_do_register_services(
   bool res =
       mysql_dynamic_loader_imp::load_do_resolve_dependencies(loaded_components);
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }
@@ -872,7 +873,7 @@ bool mysql_dynamic_loader_imp::load_do_resolve_dependencies(
   bool res = mysql_dynamic_loader_imp::load_do_initialize_components(
       loaded_components);
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }
@@ -918,7 +919,7 @@ bool mysql_dynamic_loader_imp::load_do_initialize_components(
 
   bool res = mysql_dynamic_loader_imp::load_do_commit(loaded_components);
   if (!res) {
-    guard.commit();
+    guard.release();
   }
   return res;
 }

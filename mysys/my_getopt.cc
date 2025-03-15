@@ -1,15 +1,16 @@
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -1549,10 +1550,20 @@ void my_print_help(const struct my_option *options) {
       const char *comment = optp->comment, *end = strend(comment);
 
       while ((uint)(end - comment) > comment_space) {
-        for (line_end = comment + comment_space; *line_end != ' '; line_end--) {
+        bool had_space;
+        // find the last space before the limit to break the comment on
+        for (line_end = comment + comment_space;
+             line_end > comment && *line_end != ' '; line_end--) {
         }
+        // if no space is found break at the limit - 1 (for the new line)
+        if (line_end == comment && *comment != ' ') {
+          line_end = comment + comment_space - 1;
+          had_space = false;
+        } else
+          had_space = true;
         for (; comment != line_end; comment++) putchar(*comment);
-        comment++; /* skip the space, as a newline will take it's place now */
+        if (had_space)
+          comment++; /* skip the space, as a newline will take it's place now */
         putchar('\n');
         for (col = 0; col < name_space; col++) putchar(' ');
       }

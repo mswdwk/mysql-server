@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,8 +43,10 @@ unsigned ConnectionContainer::disconnect(const AllowedNodes &nodes) {
                            return node.address.str() ==
                                   connection.first->get_destination_id();
                          }) == nodes.end()) {
-          const auto server_address = connection.first->get_server_address();
-          const auto client_address = connection.first->get_client_address();
+          auto stats = connection.first->get_stats();
+
+          const auto server_address = stats.server_address;
+          const auto client_address = stats.client_address;
 
           log_info("Disconnecting client %s from server %s",
                    client_address.c_str(), server_address.c_str());
@@ -63,7 +66,7 @@ MySQLRoutingConnectionBase *ConnectionContainer::get_connection(
 
   auto lookup = [&ret, &client_endpoint](auto &connection) {
     if (ret) return;
-    const auto client_address = connection.first->get_client_address();
+    const auto client_address = connection.first->get_stats().client_address;
     if (client_address == client_endpoint) {
       ret = connection.first;
     }

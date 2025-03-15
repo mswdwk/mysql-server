@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2006, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@
 
 #include <unordered_map>
 
+#include "my_config.h"  // WORDS_BIGENDIAN
 #include "my_dbug.h"
 #include "my_thread.h"
 #include "mysql/plugin.h"
@@ -52,6 +54,7 @@
 #include "storage/ndb/plugin/ndb_apply_status_table.h"
 #include "storage/ndb/plugin/ndb_binlog_client.h"
 #include "storage/ndb/plugin/ndb_binlog_extra_row_info.h"
+#include "storage/ndb/plugin/ndb_binlog_purger.h"
 #include "storage/ndb/plugin/ndb_binlog_thread.h"
 #include "storage/ndb/plugin/ndb_bitmap.h"
 #include "storage/ndb/plugin/ndb_blobs_buffer.h"
@@ -112,6 +115,8 @@ extern ulong opt_ndb_report_thresh_binlog_epoch_slip;
 extern ulong opt_ndb_report_thresh_binlog_mem_usage;
 extern ulonglong opt_ndb_eventbuffer_max_alloc;
 extern uint opt_ndb_eventbuffer_free_percent;
+extern ulong opt_ndb_log_purge_rate;
+extern ulong opt_ndb_log_cache_size;
 
 void ndb_index_stat_restart();
 
@@ -237,9 +242,6 @@ static ulonglong ndb_latest_applied_binlog_epoch = 0;
 static ulonglong ndb_latest_handled_binlog_epoch = 0;
 static ulonglong ndb_latest_received_binlog_epoch = 0;
 
-extern bool opt_log_replica_updates;
-static bool g_ndb_log_replica_updates;
-
 static bool g_injector_v1_warning_emitted = false;
 
 /*
@@ -314,42 +316,10 @@ static void ndbcluster_binlog_wait(THD *thd) {
   thd->set_proc_info(save_info);
 }
 
-/*
-  Setup THD object
-  'Inspired' from ha_ndbcluster.cc : ndb_util_thread_func
-*/
-THD *ndb_create_thd(char *stackptr) {
-  DBUG_TRACE;
-  THD *thd = new THD; /* note that constructor of THD uses DBUG_ */
-  if (thd == nullptr) {
-    return nullptr;
-  }
-  THD_CHECK_SENTRY(thd);
-
-  thd->thread_stack = stackptr; /* remember where our stack is */
-  thd->store_globals();
-
-  thd->init_query_mem_roots();
-  thd->set_command(COM_DAEMON);
-  thd->system_thread = SYSTEM_THREAD_NDBCLUSTER_BINLOG;
-  thd->get_protocol_classic()->set_client_capabilities(0);
-  thd->lex->start_transaction_opt = 0;
-  thd->security_context()->skip_grants();
-
-  CHARSET_INFO *charset_connection =
-      get_charset_by_csname("utf8mb3", MY_CS_PRIMARY, MYF(MY_WME));
-  thd->variables.character_set_client = charset_connection;
-  thd->variables.character_set_results = charset_connection;
-  thd->variables.collation_connection = charset_connection;
-  thd->update_charset();
-  return thd;
-}
-
-// Instantiate Ndb_binlog_thread component
+// Instantiate ndb binlog components
 static Ndb_binlog_thread ndb_binlog_thread;
-
-// Forward declaration
-static bool ndbcluster_binlog_index_remove_file(THD *thd, const char *filename);
+static Ndb_binlog_purger ndb_binlog_purger(&opt_bin_log,
+                                           &opt_ndb_log_purge_rate);
 
 /*
   @brief called when a binlog file is purged(i.e the physical
@@ -357,56 +327,59 @@ static bool ndbcluster_binlog_index_remove_file(THD *thd, const char *filename);
   to remove any rows in its mysql.ndb_binlog_index table which
   references the removed file.
 
+  @note This function can be activated by:
+   - User session calling PURGE BINARY LOGS
+   - MySQL Server startup checking time to purge
+   - rotate+purge triggered by writing to binlog, this means that the
+     ndb binlog thread itself may invoke this function when writing epoch
+     transactions to binlog.
+   - Applier thread(s) purging relay logs or binlogs. It's very rare that an
+     applier thread triggers a binlog purge as it may happen only when applying
+     a DDL. This is because DDL uses special case and is written directly to the
+     binlog on the local server, if the auto purge conditions are exceeded at
+     that time the applier will trigger a purge of the binlog.
+
+  @note This callback is normally called with the `LOCK_index` mutex held, this
+  means that time consuming work should not be performed as the mutex is
+  needed for other functionality and are assumed to not be held for long.
+  Instead, the work to remove references to the purged file are started
+  asynchronously in the background and waited for completion from
+  ndbcluster_binlog_index_purge_wait() which is then called after releasing
+  the mutex.
+
   @param thd Thread handle
   @param filename Name of the binlog file which has been removed
-
-  @return 0 for success
 */
 
-static int ndbcluster_binlog_index_purge_file(THD *thd, const char *filename) {
+static void ndbcluster_binlog_index_purge_file(THD *thd, const char *filename) {
   DBUG_TRACE;
   DBUG_PRINT("enter", ("filename: %s", filename));
 
-  // Check if the binlog thread can handle the purge.
-  // This functionality is initially only implemented for the case when the
-  // "server started" state has not yet been reached, but could in the future be
-  // extended to handle all purging by the binlog thread(this would most likley
-  // eliminate the need to create a separate THD further down in this function)
-  if (ndb_binlog_thread.handle_purge(filename)) {
-    return 0;  // Ok, purge handled by binlog thread
+  if (thd == nullptr) {
+    // No thd indicates auto purge at server startup, just submit the purged
+    // file to purger who will remove the rows when server has started properly.
+    ndb_log_info("Purging binlog file at server startup: '%s'", filename);
+    ndb_binlog_purger.submit_purge_binlog_file(nullptr, filename);
+    return;
   }
 
-  if (!ndb_binlog_running) {
-    return 0;  // Nothing to do, binlog thread not running
-  }
+  ndb_log_info("Purging binlog file: '%s'", filename);
+  ndb_binlog_purger.submit_purge_binlog_file(thd, filename);
+}
 
-  if (thd_slave_thread(thd)) {
-    return 0;  // Nothing to do, slave thread
-  }
+static void ndbcluster_binlog_index_purge_wait(THD *thd) {
+  DBUG_TRACE;
+  assert(thd);
+  // Only PURGE BINARY LOGS TO and PURGE BINARY LOGS BEFORE calls wait
+  assert(thd_sql_command(thd) == SQLCOM_PURGE ||
+         thd_sql_command(thd) == SQLCOM_PURGE_BEFORE);
 
-  // Create a separate temporary THD, primarily in order to isolate from any
-  // active transactions in the THD passed by caller. NOTE! This should be
-  // revisited
-  int stack_base = 0;
-  THD *tmp_thd = ndb_create_thd((char *)&stack_base);
-  if (!tmp_thd) {
-    ndb_log_warning("NDB Binlog: Failed to purge: '%s' (create THD failed)",
-                    filename);
-    return 0;
-  }
+  // When the ndb binlog thread triggers a purge it should never wait
+  assert(!ndb_thd_is_binlog_thread(thd));
 
-  int error = 0;
-  if (ndbcluster_binlog_index_remove_file(tmp_thd, filename)) {
-    // Failed to delete rows from table
-    ndb_log_warning("NDB Binlog: Failed to purge: '%s'", filename);
-    error = 1;  // Failed
-  }
-  delete tmp_thd;
-
-  /* Relink original THD */
-  thd->store_globals();
-
-  return error;
+  // Wait until purger has removed all files requested by this session
+  ndb_log_info("Waiting for purge to complete");
+  ndb_binlog_purger.wait_purge_completed_for_session(thd);
 }
 
 /*
@@ -594,12 +567,17 @@ static void ndbcluster_acl_notify(THD *thd,
     raise_error("as statement");
 }
 
-/*
-  End use of the NDB Cluster binlog
-   - wait for binlog thread to shutdown
-*/
+void ndbcluster_binlog_pre_dd_shutdown() {
+  // Stop to avoid active transactions in InnoDB
+  ndb_binlog_purger.stop();
+}
 
-int ndbcluster_binlog_end() {
+/*
+  Stop the binlog components
+   - wait for both binlog thread and purger to shutdown
+   - release resources
+*/
+void ndbcluster_binlog_end() {
   DBUG_TRACE;
 
   if (ndbcluster_binlog_inited) {
@@ -608,12 +586,13 @@ int ndbcluster_binlog_end() {
     ndb_binlog_thread.stop();
     ndb_binlog_thread.deinit();
 
+    ndb_binlog_purger.stop();
+    ndb_binlog_purger.deinit();
+
     mysql_mutex_destroy(&injector_event_mutex);
     mysql_mutex_destroy(&injector_data_mutex);
     mysql_cond_destroy(&injector_data_cond);
   }
-
-  return 0;
 }
 
 /*****************************************************************
@@ -645,7 +624,6 @@ static void ndbcluster_reset_slave(THD *thd) {
 static int ndbcluster_binlog_func(handlerton *, THD *thd, enum_binlog_func fn,
                                   void *arg) {
   DBUG_TRACE;
-  int res = 0;
   switch (fn) {
     case BFN_RESET_LOGS:
       ndbcluster_reset_logs();
@@ -657,13 +635,16 @@ static int ndbcluster_binlog_func(handlerton *, THD *thd, enum_binlog_func fn,
       ndbcluster_binlog_wait(thd);
       break;
     case BFN_BINLOG_END:
-      res = ndbcluster_binlog_end();
+      ndbcluster_binlog_end();
       break;
     case BFN_BINLOG_PURGE_FILE:
-      res = ndbcluster_binlog_index_purge_file(thd, (const char *)arg);
+      ndbcluster_binlog_index_purge_file(thd, (const char *)arg);
+      break;
+    case BFN_BINLOG_PURGE_WAIT:
+      ndbcluster_binlog_index_purge_wait(thd);
       break;
   }
-  return res;
+  return 0;
 }
 
 bool ndbcluster_binlog_init(handlerton *h) {
@@ -1062,6 +1043,18 @@ bool Ndb_schema_dist_client::write_schema_op_to_NDB(
 }
 
 /*
+  Check whether the Server-local schema distribution mechanism
+  is available
+*/
+bool Ndb_schema_dist_client::check_local_schema_dist_available() const {
+  /**
+   * Schema distribution is not available if the local
+   * BI is either not yet setup, or shut[ting] down
+   */
+  return ndb_binlog_is_initialized();
+}
+
+/*
   log query in ndb_schema table
 */
 
@@ -1126,14 +1119,17 @@ bool Ndb_schema_dist_client::log_schema_op_impl(
     m_thd->killed = THD::KILL_QUERY;
   }
 
-  ndb_log_verbose(19, "Distribution of '%s' - started!", op_name.c_str());
   if (ndb_log_get_verbose_level() >= 19) {
-    ndb_log_error_dump("Schema_op {");
-    ndb_log_error_dump("type: %d", type);
+    const char *line_separator = "\n";
+    std::stringstream ss;
+    ss << "Schema_op { " << line_separator;
+    ss << "  type: " << type << ", " << line_separator;
     // ACL statements may contain passwords, so skip logging them here
     if (type != SOT_ACL_STATEMENT && type != SOT_ACL_STATEMENT_REFRESH)
-      ndb_log_error_dump("query: '%s'", query);
-    ndb_log_error_dump("}");
+      ss << "  query: '" << query << "'" << line_separator;
+    ss << "}";
+    ndb_log_info("Distribution of '%s' - started! %s", op_name.c_str(),
+                 ss.str().c_str());
   }
 
   // Wait for participants to complete the schema change
@@ -1164,7 +1160,8 @@ bool Ndb_schema_dist_client::log_schema_op_impl(
     }
 
     // Check if schema distribution is still ready.
-    if (m_share->have_event_operation() == false) {
+    if (m_share->have_event_operation() == false ||
+        m_result_share->have_event_operation() == false) {
       // This case is unlikely, but there is small race between
       // clients first check for schema distribution ready and schema op
       // registered in the coordinator(since the message is passed
@@ -1226,25 +1223,16 @@ static void ndbcluster_binlog_event_operation_teardown(THD *thd, Ndb *is_ndb,
       Ndb_event_data::get_event_data(pOp->getCustomData());
   NDB_SHARE *const share = event_data->share;
 
-  // Invalidate any cached NdbApi table if object version is lower
-  // than what was used when setting up the NdbEventOperation
-  // NOTE! This functionality need to be explained further
-  {
-    Thd_ndb *thd_ndb = get_thd_ndb(thd);
-    Ndb *ndb = thd_ndb->ndb;
-    Ndb_table_guard ndbtab_g(ndb, share->db, share->table_name);
-    const NDBTAB *ev_tab = pOp->getTable();
-    const NDBTAB *cache_tab = ndbtab_g.get_table();
-    if (cache_tab && cache_tab->getObjectId() == ev_tab->getObjectId() &&
-        cache_tab->getObjectVersion() <= ev_tab->getObjectVersion())
-      ndbtab_g.invalidate();
-  }
+  // Since table has been dropped or cluster connection lost the NdbApi table
+  // should be invalidated in the global dictionary cache
+  Ndb_table_guard::invalidate_table(is_ndb, share->db, share->table_name);
 
   // Close the table in MySQL Server
   ndb_tdc_close_cached_table(thd, share->db, share->table_name);
 
   // Drop the NdbEventOperation from NdbApi
   mysql_mutex_lock(&injector_event_mutex);
+  pOp->setCustomData(nullptr);
   is_ndb->dropEventOperation(pOp);
   mysql_mutex_unlock(&injector_event_mutex);
 
@@ -1801,7 +1789,6 @@ class Ndb_schema_event_handler {
       return;
     }
 
-    Uint32 queryServerId = ndbcluster_anyvalue_get_serverid(schema->any_value);
     /*
        Start with serverId as received AnyValue, in case it's a composite
        (server_id_bits < 31).
@@ -1812,14 +1799,10 @@ class Ndb_schema_event_handler {
     */
     Uint32 loggedServerId = schema->any_value;
 
-    if (queryServerId) {
-      /*
-         AnyValue has non-zero serverId, must be a query applied by a slave
-         mysqld.
-         TODO : Assert that we are running in the Binlog injector thread?
-      */
-      if (!g_ndb_log_replica_updates) {
-        /* This MySQLD does not log slave updates */
+    if (ndbcluster_anyvalue_get_serverid(schema->any_value)) {
+      // The anyvalue contains serverid, which means it's applied by a replica.
+      if (!opt_log_replica_updates) {
+        /* This MySQLD does not log replica updates */
         return;
       }
     } else {
@@ -2293,8 +2276,7 @@ class Ndb_schema_event_handler {
   void ndbapi_invalidate_table(const char *db_name,
                                const char *table_name) const {
     DBUG_TRACE;
-    Ndb_table_guard ndbtab_g(m_thd_ndb->ndb, db_name, table_name);
-    ndbtab_g.invalidate();
+    Ndb_table_guard::invalidate_table(m_thd_ndb->ndb, db_name, table_name);
   }
 
   NDB_SHARE *acquire_reference(const char *db, const char *name,
@@ -2540,6 +2522,7 @@ class Ndb_schema_event_handler {
 
         // Drop the op from NdbApi
         mysql_mutex_lock(&injector_event_mutex);
+        old_op->setCustomData(nullptr);
         injector_ndb->dropEventOperation(old_op);
         mysql_mutex_unlock(&injector_event_mutex);
 
@@ -2678,6 +2661,7 @@ class Ndb_schema_event_handler {
 
     // Drop old event operation
     mysql_mutex_lock(&injector_event_mutex);
+    old_op->setCustomData(nullptr);
     injector_ndb->dropEventOperation(old_op);
     mysql_mutex_unlock(&injector_event_mutex);
 
@@ -3114,8 +3098,8 @@ class Ndb_schema_event_handler {
     if (found_local_tables) {
       /* Tables exists as a local table, print error and leave it */
       ndb_log_warning(
-          "NDB Binlog: Skipping drop database '%s' since "
-          "it contained local tables "
+          "Binlog: Skipping drop database '%s' since "
+          "it contained local tables, "
           "binlog schema event '%s' from node %d. ",
           schema->db, schema->query, schema->node_id);
       m_schema_op_result.set_result(
@@ -3186,6 +3170,8 @@ class Ndb_schema_event_handler {
     if (schema->node_id == own_nodeid()) return;
 
     write_schema_op_to_binlog(m_thd, schema);
+    ndbapi_invalidate_table(schema->db, schema->name);
+    ndb_tdc_close_cached_table(m_thd, schema->db, schema->name);
 
     if (!create_table_from_engine(schema->db, schema->name,
                                   true, /* force_overwrite */
@@ -3297,7 +3283,7 @@ class Ndb_schema_event_handler {
     }
 
     // Possibly change server id for binlog, or disable binlogging:
-    sql_runner.set_binlog_options(g_ndb_log_replica_updates, schema->any_value);
+    sql_runner.set_binlog_options(opt_log_replica_updates, schema->any_value);
 
     /* For SOT_ACL_SNAPSHOT, update the snapshots for the users listed.
      */
@@ -4009,7 +3995,7 @@ class Ndb_schema_event_handler {
   */
   void handle_cluster_failure(Ndb *s_ndb, NdbEventOperation *pOp) const {
     if (ndb_binlog_tables_inited && ndb_binlog_running)
-      ndb_log_verbose(1, "NDB Binlog: util tables need to reinitialize");
+      ndb_log_verbose(1, "Binlog: util tables need to reinitialize");
 
     // Indicate util tables not ready
     mysql_mutex_lock(&injector_data_mutex);
@@ -4233,7 +4219,7 @@ class Ndb_schema_event_handler {
       ndb_log_info(" - schema operation active on '%s.%s'", schema_object->db(),
                    schema_object->name());
       if (ndb_log_get_verbose_level() > 30) {
-        ndb_log_error_dump("%s", schema_object->to_string().c_str());
+        ndb_log_info("%s", schema_object->to_string().c_str());
       }
 
       // Check if schema operation has timed out
@@ -4261,14 +4247,9 @@ class Ndb_schema_event_handler {
     // take the GSL properly
     assert(!m_thd_ndb->check_option(Thd_ndb::IS_SCHEMA_DIST_PARTICIPANT));
 
-    // Sleep here will make other mysql server in same cluster setup to create
-    // the schema result table in NDB before this mysql server. This also makes
-    // the create table in the connection thread to acquire GSL before the
-    // Binlog thread
-    DBUG_EXECUTE_IF("ndb_bi_sleep_before_gsl", sleep(1););
     // Protect the setup with GSL(Global Schema Lock)
     Ndb_global_schema_lock_guard global_schema_lock_guard(m_thd);
-    if (global_schema_lock_guard.lock()) {
+    if (!global_schema_lock_guard.try_lock()) {
       ndb_log_info(" - failed to lock GSL");
       return true;
     }
@@ -4414,9 +4395,9 @@ class Ndb_binlog_index_table_util {
         MYSQL_LOCK_IGNORE_TIMEOUT; /* Wait for lock "infinitely" */
     if (open_and_lock_tables(thd, &tables, flags)) {
       if (thd->killed)
-        DBUG_PRINT("error", ("NDB Binlog: Opening ndb_binlog_index: killed"));
+        DBUG_PRINT("error", ("Opening ndb_binlog_index: killed"));
       else
-        ndb_log_error("NDB Binlog: Opening ndb_binlog_index: %d, '%s'",
+        ndb_log_error("Binlog: Opening ndb_binlog_index: %d, '%s'",
                       thd->get_stmt_da()->mysql_errno(),
                       thd->get_stmt_da()->message_text());
       thd_proc_info(thd, save_proc_info);
@@ -4452,11 +4433,9 @@ class Ndb_binlog_index_table_util {
 
     if (open_binlog_index_table(thd, &ndb_binlog_index)) {
       if (thd->killed)
-        DBUG_PRINT(
-            "error",
-            ("NDB Binlog: Unable to lock table ndb_binlog_index, killed"));
+        DBUG_PRINT("error", ("Unable to lock table ndb_binlog_index, killed"));
       else
-        ndb_log_error("NDB Binlog: Unable to lock table ndb_binlog_index");
+        ndb_log_error("Binlog: Unable to lock table ndb_binlog_index");
       error = -1;
       goto add_ndb_binlog_index_err;
     }
@@ -4534,7 +4513,7 @@ class Ndb_binlog_index_table_util {
       if (DBUG_EVALUATE_IF("ndb_injector_binlog_index_write_fail_random", true,
                            false)) {
         if ((((uint32)rand()) % 10) == 9) {
-          ndb_log_error("NDB Binlog: Injecting random write failure");
+          ndb_log_error("Binlog: Injecting random write failure");
           error =
               ndb_binlog_index->file->ha_write_row(ndb_binlog_index->record[0]);
         }
@@ -4542,7 +4521,7 @@ class Ndb_binlog_index_table_util {
 
       if (error) {
         ndb_log_error(
-            "NDB Binlog: Failed writing to ndb_binlog_index for "
+            "Binlog: Failed writing to ndb_binlog_index for "
             "epoch %u/%u orig_server_id %u orig_epoch %u/%u "
             "with error %d.",
             uint(epoch >> 32), uint(epoch), orig_server_id,
@@ -4562,7 +4541,7 @@ class Ndb_binlog_index_table_util {
 
           bool error_row = (row == (cursor->next));
           ndb_log_error(
-              "NDB Binlog: Writing row (%s) to ndb_binlog_index - %s", tmp,
+              "Binlog: Writing row (%s) to ndb_binlog_index - %s", tmp,
               (error_row ? "ERROR" : (seen_error_row ? "Discarded" : "OK")));
           seen_error_row |= error_row;
 
@@ -4596,7 +4575,7 @@ class Ndb_binlog_index_table_util {
         */
         error = thd->get_stmt_da()->mysql_errno();
         ndb_log_error(
-            "NDB Binlog: Failed committing transaction to "
+            "Binlog: Failed committing transaction to "
             "ndb_binlog_index with error %d.",
             error);
         trans_rollback_stmt(thd);
@@ -4637,7 +4616,7 @@ class Ndb_binlog_index_table_util {
     const int retry_result = write_rows_impl(new_thd, rows);
     if (retry_result) {
       ndb_log_error(
-          "NDB Binlog: Failed writing to ndb_binlog_index table "
+          "Binlog: Failed writing to ndb_binlog_index table "
           "while retrying after kill during shutdown");
       assert(false);  // Crash in debug compile
     }
@@ -4676,52 +4655,7 @@ class Ndb_binlog_index_table_util {
     // Relink this thread with original THD
     orig_thd->store_globals();
   }
-
-  /*
-    @brief Remove all rows from mysql.ndb_binlog_index table that contain
-    references to the given binlog filename.
-
-    @note this function modifies THD state. Caller must ensure that
-    the passed in THD is not affected by these changes. Presumably
-    the state fixes should be moved down into Ndb_local_connection.
-
-    @param thd The thread handle
-    @param filename Name of the binlog file whose references should be removed
-
-    @return true if failure to delete from the table occurs
-  */
-
-  static bool remove_rows_for_file(THD *thd, const char *filename) {
-    Ndb_local_connection mysqld(thd);
-
-    // Set isolation level to be independent from server settings
-    thd->variables.transaction_isolation = ISO_REPEATABLE_READ;
-
-    // Turn autocommit on, this will make delete_rows() commit
-    thd->variables.option_bits &= ~OPTION_NOT_AUTOCOMMIT;
-
-    // Ensure that file paths are escaped in a way that does not
-    // interfere with path separator on Windows
-    thd->variables.sql_mode |= MODE_NO_BACKSLASH_ESCAPES;
-
-    // ignore "table does not exist" as it is a "consistent" behavior
-    const bool ignore_no_such_table = true;
-    std::string where;
-    where.append("File='").append(filename).append("'");
-    if (mysqld.delete_rows(DB_NAME, TABLE_NAME, ignore_no_such_table, where)) {
-      // Failed
-      return true;
-    }
-    return false;
-  }
 };
-
-// Wrapper function allowing Ndb_binlog_index_table_util::remove_rows_for_file()
-// to be forward declared
-static bool ndbcluster_binlog_index_remove_file(THD *thd,
-                                                const char *filename) {
-  return Ndb_binlog_index_table_util::remove_rows_for_file(thd, filename);
-}
 
 /*********************************************************************
   Functions for start, stop, wait for ndbcluster binlog thread
@@ -4761,6 +4695,7 @@ int ndbcluster_binlog_start() {
   }
 
   ndb_binlog_thread.init();
+  ndb_binlog_purger.init();
 
   /**
    * Note that injector_event_mutex is init'ed as a 'SLOW' mutex.
@@ -4782,11 +4717,18 @@ int ndbcluster_binlog_start() {
     return -1;
   }
 
+  /* Start ndb binlog purger */
+  if (ndb_binlog_purger.start()) {
+    DBUG_PRINT("error", ("Could not start ndb binlog purger"));
+    return -1;
+  }
+
   return 0;
 }
 
 void ndbcluster_binlog_set_server_started() {
   ndb_binlog_thread.set_server_started();
+  ndb_binlog_purger.set_server_started();
 }
 
 void NDB_SHARE::set_binlog_flags(Ndb_binlog_type ndb_binlog_type) {
@@ -4854,6 +4796,18 @@ void NDB_SHARE::set_binlog_flags(Ndb_binlog_type ndb_binlog_type) {
       return;
   }
   flags &= ~NDB_SHARE::FLAG_NO_BINLOG;
+
+  // The ndb_apply_status table should always use WRITE format.
+  // NOTE! This is the second hardcoding complementing the one in
+  // read_replication_info(), that hardcoding forces use of FULL (which implies
+  // WRITE) when --ndb-log-apply-status=1. Although this setting will not have
+  // any effect unless --ndb-log-apply-status=1, it is hardcocded here again in
+  // order to make it possible to dynamically change --ndb-log-apply-status at
+  // runtime.
+  if (is_apply_status_table()) {
+    flags &= ~NDB_SHARE::FLAG_BINLOG_MODE_USE_UPDATE;
+    return;
+  }
 }
 
 /*
@@ -4871,19 +4825,17 @@ bool Ndb_binlog_client::read_replication_info(
     st_conflict_fn_arg *args, uint *num_args) {
   DBUG_TRACE;
 
-  /* Override for ndb_apply_status when logging */
-  if (opt_ndb_log_apply_status) {
-    if (Ndb_apply_status_table::is_apply_status_table(db, table_name)) {
-      // Ensure to get all columns from ndb_apply_status updates and that events
-      // are always logged as WRITES.
-      ndb_log_info(
-          "ndb-log-apply-status forcing 'mysql.ndb_apply_status' to FULL "
-          "USE_WRITE");
-      *binlog_flags = NBT_FULL;
-      *conflict_fn = nullptr;
-      *num_args = 0;
-      return false;
-    }
+  if (opt_ndb_log_apply_status &&
+      Ndb_apply_status_table::is_apply_status_table(db, table_name)) {
+    // ndb_apply_status can't be configured using ndb_replication settings.
+    // It should always receive all columns when ndb_apply_status is
+    // updated and those changes should be logged as WRITE to the binlog.
+    // NOTE! The table is always subscribed, but these updates are only written
+    // to binlog when --ndb-log-apply-status is ON.
+    *binlog_flags = NBT_FULL;
+    *conflict_fn = nullptr;
+    *num_args = 0;
+    return false;
   }
 
   Ndb_rep_tab_reader rep_tab_reader;
@@ -4897,7 +4849,7 @@ bool Ndb_binlog_client::read_replication_info(
       push_warning_printf(m_thd, Sql_condition::SL_WARNING,
                           ER_NDB_REPLICATION_SCHEMA_ERROR,
                           ER_THD(m_thd, ER_NDB_REPLICATION_SCHEMA_ERROR), msg);
-      ndb_log_warning("NDB Binlog: %s", msg);
+      ndb_log_warning("Binlog: %s", msg);
     }
   } else {
     /* When rep_tab_reader.lookup() returns with non-zero error code,
@@ -4905,7 +4857,7 @@ bool Ndb_binlog_client::read_replication_info(
     const char *msg = rep_tab_reader.get_warning_message();
     assert(msg);
     my_error(ER_NDB_REPLICATION_SCHEMA_ERROR, MYF(0), msg);
-    ndb_log_warning("NDB Binlog: %s", msg);
+    ndb_log_warning("Binlog: %s", msg);
     return true;
   }
 
@@ -4922,9 +4874,8 @@ bool Ndb_binlog_client::read_replication_info(
         Log as well, useful for contexts where the thd's stack of
         warnings are ignored
       */
-      ndb_log_warning(
-          "NDB Replica: Table %s.%s : Parse error on conflict fn : %s", db,
-          table_name, msgbuf);
+      ndb_log_warning("Replica: Table %s.%s : Parse error on conflict fn : %s",
+                      db, table_name, msgbuf);
 
       return true;
     }
@@ -4967,15 +4918,15 @@ int Ndb_binlog_client::apply_replication_info(
                           share->table_name, share->get_binlog_use_update(),
                           ndbtab, tmp_buf, sizeof(tmp_buf), conflict_fn, args,
                           num_args) == 0) {
-      ndb_log_verbose(1, "NDB Replica: %s", tmp_buf);
+      ndb_log_verbose(1, "Replica: %s", tmp_buf);
     } else {
       /*
         Dump setup failure message to error log
         for cases where thd warning stack is
         ignored
       */
-      ndb_log_warning("NDB Replica: Table %s.%s : %s", share->db,
-                      share->table_name, tmp_buf);
+      ndb_log_warning("Replica: Table %s.%s : %s", share->db, share->table_name,
+                      tmp_buf);
 
       push_warning_printf(m_thd, Sql_condition::SL_WARNING,
                           ER_CONFLICT_FN_PARSE_ERROR,
@@ -5030,7 +4981,7 @@ static int ndbcluster_setup_binlog_for_share(THD *thd, Ndb *ndb,
   if (ndbtab == nullptr) {
     const NdbError &ndb_error = ndbtab_g.getNdbError();
     ndb_log_verbose(1,
-                    "NDB Binlog: Failed to open table '%s' from NDB, "
+                    "Binlog: Failed to open table '%s' from NDB, "
                     "error: '%d - %s'",
                     share->key_string(), ndb_error.code, ndb_error.message);
     return -1;  // error
@@ -5039,7 +4990,7 @@ static int ndbcluster_setup_binlog_for_share(THD *thd, Ndb *ndb,
   if (binlog_client.read_and_apply_replication_info(ndb, share, ndbtab,
                                                     ::server_id)) {
     ndb_log_error(
-        "NDB Binlog: Failed to read and apply replication "
+        "Binlog: Failed to read and apply replication "
         "info for table '%s'",
         share->key_string());
     return -1;
@@ -5267,6 +5218,63 @@ inline int is_ndb_compatible_type(Field *field) {
          field->pack_length() != 0;
 }
 
+struct AnyValueFilter {
+  // Bits used to record any-value indication
+  static constexpr Uint32 REPLICA_UPDATE = 1 << 0;
+  static constexpr Uint32 NOT_REPLICA_UPDATE = 1 << 1;
+  static constexpr Uint32 NO_LOGGING_NOT_SET = 1 << 2;
+  static constexpr Uint32 NO_LOGGING_SET = 1 << 3;
+
+  /**
+     @brief Function for filtering the any_value in each row change
+     received for a NdbEventOperation.
+
+     @param any_value The any_value belonging to received row change
+     @return The 32 bit value describing what was "found" in the
+     current any_value. The NdbApi will do a bitwise OR with all other
+     row changes in same epoch and then return that value when
+     iterating over all the event operations (i.e. tables) received in
+     an epoch.
+   */
+  static Uint32 do_filter(Uint32 any_value) {
+    DBUG_TRACE;
+    Uint32 filtered_value = 0;
+
+    if (ndbcluster_anyvalue_is_reserved(any_value)) {
+      if (!ndbcluster_anyvalue_is_nologging(any_value)) {
+        // Received row change where no logging was not set
+        filtered_value |= NO_LOGGING_NOT_SET;
+      } else {
+        // Received row change where no logging was set
+        filtered_value |= NO_LOGGING_SET;
+      }
+    } else {
+      if (ndbcluster_anyvalue_get_serverid(any_value) == 0) {
+        // Received row change with server_id part of any_value being zero, this
+        // indicates that it was not a replica that performed this row change
+        filtered_value |= NOT_REPLICA_UPDATE;
+      } else {
+        // Received row change with server_id set, this indicates replica
+        // update.
+        filtered_value |= REPLICA_UPDATE;
+      }
+    }
+    return filtered_value;
+  }
+
+  // Must be sole no-logging
+  static bool is_only_nologging(Uint32 any_value) {
+    return any_value == NO_LOGGING_SET;
+  }
+  // The any_value must *not* contain the bit for NOT_REPLICA_UPDATE
+  // to be deemed as a replica only update of rows.
+  static bool is_only_replica_update(Uint32 any_value) {
+    const Uint32 is_replica = (any_value & REPLICA_UPDATE) == REPLICA_UPDATE;
+    const Uint32 no_replica = (any_value & NOT_REPLICA_UPDATE) == 0;
+    return is_replica && no_replica;
+  }
+};
+
 /**
    Create event operation in NDB and setup Ndb_event_data for receiving events.
 
@@ -5314,9 +5322,9 @@ NdbEventOperation *Ndb_binlog_client::create_event_op_in_NDB(
     }
 
     /* Check if user explicitly requires monitoring of empty updates */
-    if (opt_ndb_log_empty_update) {
-      op->setAllowEmptyUpdate(true);
-    }
+    op->setAllowEmptyUpdate(opt_ndb_log_empty_update);
+
+    op->setAnyValueFilter(AnyValueFilter::do_filter);
 
     // Setup the attributes that should be subscribed.
     const TABLE *table = event_data->shadow_table;
@@ -5331,10 +5339,13 @@ NdbEventOperation *Ndb_binlog_client::create_event_op_in_NDB(
         Field *f = table->field[map.get_field_for_column(j)];
         if (is_ndb_compatible_type(f)) {
           DBUG_PRINT("info", ("%s compatible", col_name));
-          attr0.rec = op->getValue(col_name, (char *)f->field_ptr());
-          attr1.rec =
-              op->getPreValue(col_name, (f->field_ptr() - table->record[0]) +
-                                            (char *)table->record[1]);
+          char *const ptr0 = (char *)f->field_ptr();
+          attr0.rec = op->getValue(col_name, ptr0);
+          assert(attr0.rec->aRef() == ptr0);  // uses provided ptr
+          char *const ptr1 =
+              (f->field_ptr() - table->record[0]) + (char *)table->record[1];
+          attr1.rec = op->getPreValue(col_name, ptr1);
+          assert(attr1.rec->aRef() == ptr1);  // uses provided ptr
         } else if (!f->is_flag_set(BLOB_FLAG)) {
           DBUG_PRINT("info", ("%s non compatible", col_name));
           attr0.rec = op->getValue(col_name);
@@ -5352,6 +5363,7 @@ NdbEventOperation *Ndb_binlog_client::create_event_op_in_NDB(
                         event_name.c_str(), j, op->getNdbError().code,
                         op->getNdbError().message);
             mysql_mutex_assert_owner(&injector_event_mutex);
+            op->setCustomData(nullptr);
             ndb->dropEventOperation(op);
             return nullptr;
           }
@@ -5384,8 +5396,8 @@ NdbEventOperation *Ndb_binlog_client::create_event_op_in_NDB(
                     event_name.c_str(), ndb_err.code, ndb_err.message);
       }
       mysql_mutex_assert_owner(&injector_event_mutex);
+      op->setCustomData(nullptr);
       (void)ndb->dropEventOperation(op);  // Never fails, drop is in NdbApi only
-
       if (retries && !m_thd->killed) {
         // fairly high retry sleep, temporary error on schema operation can
         // take some time to resolve
@@ -5486,6 +5498,7 @@ int Ndb_binlog_client::create_event_op(NDB_SHARE *share,
                 "Failed to create event operation, could not save in share");
 
     mysql_mutex_assert_owner(&injector_event_mutex);
+    new_op->setCustomData(nullptr);
     (void)ndb->dropEventOperation(new_op);  // Never fails
 
     Ndb_event_data::destroy(event_data);
@@ -5504,7 +5517,7 @@ int Ndb_binlog_client::create_event_op(NDB_SHARE *share,
   }
 
   // This MySQL Server are now logging changes for the table
-  ndb_log_verbose(1, "NDB Binlog: logging %s (%s,%s)", share->key_string(),
+  ndb_log_verbose(1, "Binlog: logging %s (%s,%s)", share->key_string(),
                   share->get_binlog_full() ? "FULL" : "UPDATED",
                   share->get_binlog_use_update() ? "USE_UPDATE" : "USE_WRITE");
 
@@ -5518,7 +5531,7 @@ void Ndb_binlog_client::drop_events_for_table(THD *thd, Ndb *ndb,
   DBUG_PRINT("enter", ("db: %s, tabname: %s", db, table_name));
 
   if (DBUG_EVALUATE_IF("ndb_skip_drop_event", true, false)) {
-    ndb_log_verbose(1, "NDB Binlog: skipping drop event on '%s.%s'", db,
+    ndb_log_verbose(1, "Binlog: skipping drop event on '%s.%s'", db,
                     table_name);
     return;
   }
@@ -5544,7 +5557,7 @@ void Ndb_binlog_client::drop_events_for_table(THD *thd, Ndb *ndb,
                         dict->getNdbError().message, "NDB");
 
     ndb_log_error(
-        "NDB Binlog: Unable to drop event for '%s.%s' from NDB, "
+        "Binlog: Unable to drop event for '%s.%s' from NDB, "
         "event_name: '%s' error: '%d - %s'",
         db, table_name, event_name.c_str(), dict->getNdbError().code,
         dict->getNdbError().message);
@@ -5659,6 +5672,7 @@ bool ndbcluster_binlog_check_table_async(const std::string &db_name,
     // Never check util tables which are managed by the Ndb_binlog_thread
     // NOTE! The other tables are filtered elsewhere but ndb_apply_status is
     // special since it's not hidden.
+    assert(false);
     return false;
   }
 
@@ -5986,17 +6000,25 @@ int Ndb_binlog_thread::handle_error(NdbEventOperation *pOp) const {
   return 0;
 }
 
-/**
-   Inject an incident (aka. 'lost events' or 'gap') into the injector,
-   indicating that problem has occurred while processing the event stream.
+void Ndb_binlog_thread::inject_incident_message(injector *inj, THD *thd,
+                                                const char *message) const {
+  DBUG_TRACE;
 
-   @param thd           The thread handle
-   @param inj           Pointer to the injector
-   @param event_type    Type of the event problem that has occurred.
-   @param gap_epoch     The epoch when problem was detected.
+  // First write the error message to log
+  log_info("Writing incident '%s' to binlog", message);
 
-*/
-void Ndb_binlog_thread::inject_incident(
+  // Write incident message to injector
+  if (inj->record_incident(thd, message) != 0) {
+    log_error("Failed to write incident to binlog");
+    return;
+  }
+
+  // Since injecting an incident to binlog is rare, also write message to log
+  // indicating that incident has been written
+  log_info("Incident '%s' written to binlog", message);
+}
+
+void Ndb_binlog_thread::inject_incident_for_event(
     injector *inj, THD *thd, NdbDictionary::Event::TableEvent event_type,
     Uint64 gap_epoch) const {
   DBUG_TRACE;
@@ -6010,19 +6032,9 @@ void Ndb_binlog_thread::inject_incident(
 
   char errmsg[80];
   snprintf(errmsg, sizeof(errmsg),
-           "Detected %s in GCI %llu, "
-           "inserting GAP event",
-           reason, gap_epoch);
-
-  // Write error message to log
-  log_error("%s", errmsg);
-
-  // Record incident in injector
-  LEX_CSTRING const msg = {errmsg, strlen(errmsg)};
-  if (inj->record_incident(
-          thd, binary_log::Incident_event::INCIDENT_LOST_EVENTS, msg) != 0) {
-    log_error("Failed to record incident");
-  }
+           "Detected %s in epoch %u/%u, inserting GAP event", reason,
+           (uint)(gap_epoch >> 32), (uint)(gap_epoch));
+  inject_incident_message(inj, thd, errmsg);
 }
 
 /**
@@ -6281,7 +6293,7 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
   }
 
   uint32 originating_server_id = ndbcluster_anyvalue_get_serverid(anyValue);
-  bool log_this_slave_update = g_ndb_log_replica_updates;
+  bool log_this_slave_update = opt_log_replica_updates;
   bool count_this_event = true;
 
   if (share == m_apply_status_share) {
@@ -6686,6 +6698,30 @@ void Ndb_binlog_thread::fix_per_epoch_trans_settings(THD *thd) {
   thd->variables.character_set_client = &my_charset_latin1;
 }
 
+bool Ndb_binlog_thread::configure_binlog_cache_size(THD *thd,
+                                                    ulong new_cache_size) {
+  if (new_cache_size == m_configured_ndb_log_cache_size) {
+    // No change detected
+    return true;
+  }
+  log_info("Reconfiguring binlog cache size");
+
+  // Make sure that binlog cache has been created. Normally, the only time when
+  // it does not exist is during startup and then it will be created with
+  // default settings before being reconfigured below.
+  if (thd->binlog_setup_trx_data() != 0) {
+    // Failed to create binlog cache resources
+    return false;
+  }
+
+  if (thd->binlog_configure_trx_cache_size(new_cache_size)) {
+    // Failed to reconfigure cache
+    return false;
+  }
+  m_configured_ndb_log_cache_size = new_cache_size;
+  return true;
+}
+
 /**
    @brief Handle events for one epoch
 
@@ -6707,7 +6743,7 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
   if (event_type == NdbDictionary::Event::TE_INCONSISTENT ||
       event_type == NdbDictionary::Event::TE_OUT_OF_MEMORY) {
     // Error has occurred in event stream processing, inject incident
-    inject_incident(inj, thd, event_type, current_epoch);
+    inject_incident_for_event(inj, thd, event_type, current_epoch);
 
     i_pOp = i_ndb->nextEvent2();
     return true;  // OK, error handled
@@ -6721,6 +6757,11 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
   memset(&_row, 0, sizeof(_row));
 
   fix_per_epoch_trans_settings(thd);
+
+  if (!configure_binlog_cache_size(thd, opt_ndb_log_cache_size)) {
+    log_error("Failed to configure --ndb-log-cache-size");
+    return false;  // Error
+  }
 
   // Create new binlog transaction
   injector_transaction trans;
@@ -6767,7 +6808,6 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
 
   // Apply changes to user configurable variables once per epoch
   i_ndb->set_eventbuf_max_alloc(opt_ndb_eventbuffer_max_alloc);
-  g_ndb_log_replica_updates = opt_log_replica_updates;
   i_ndb->setReportThreshEventGCISlip(opt_ndb_report_thresh_binlog_epoch_slip);
   i_ndb->setReportThreshEventFreeMem(opt_ndb_report_thresh_binlog_mem_usage);
 
@@ -6823,6 +6863,7 @@ void Ndb_binlog_thread::remove_event_operations(Ndb *ndb) {
 
     // Drop the op from NdbApi
     mysql_mutex_lock(&injector_event_mutex);
+    op->setCustomData(nullptr);
     (void)ndb->dropEventOperation(op);
     mysql_mutex_unlock(&injector_event_mutex);
 
@@ -6878,6 +6919,7 @@ static SHOW_VAR ndb_status_vars_injector[] = {
     {"api_event_bytes_count_injector",
      reinterpret_cast<char *>(&g_event_bytes_count), SHOW_LONGLONG,
      SHOW_SCOPE_GLOBAL},
+    {"Ndb", (char *)&show_ndb_purger_stats, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
 int show_ndb_status_injector(THD *, SHOW_VAR *var, char *) {
@@ -7005,11 +7047,14 @@ void Ndb_binlog_thread::do_wakeup() {
   */
 }
 
-bool Ndb_binlog_thread::check_reconnect_incident(
+void Ndb_binlog_thread::check_reconnect_incident(
     THD *thd, injector *inj, Reconnect_type incident_id) const {
+  const char *msg = "cluster disconnect";
   log_verbose(1, "Check for incidents");
 
   if (incident_id == MYSQLD_STARTUP) {
+    msg = "mysqld startup";
+
     LOG_INFO log_info;
     mysql_bin_log.get_current_log(&log_info);
     log_verbose(60, " - current binlog file: %s", log_info.log_file_name);
@@ -7023,59 +7068,12 @@ bool Ndb_binlog_thread::check_reconnect_incident(
       */
       log_verbose(60, " - skipping incident for first log, log_number: %u",
                   log_number);
-      return false;  // No incident written
+      return;  // No incident written
     }
     log_verbose(60, " - current binlog file number: %u", log_number);
   }
 
-  // Write an incident event to the binlog since it's not possible to know what
-  // has happened in the cluster while not being connected.
-  LEX_CSTRING msg;
-  switch (incident_id) {
-    case MYSQLD_STARTUP:
-      msg = {STRING_WITH_LEN("mysqld startup")};
-      break;
-    case CLUSTER_DISCONNECT:
-      msg = {STRING_WITH_LEN("cluster disconnect")};
-      break;
-  }
-  log_verbose(20, "Writing incident for %s", msg.str);
-  (void)inj->record_incident(
-      thd, binary_log::Incident_event::INCIDENT_LOST_EVENTS, msg);
-
-  return true;  // Incident written
-}
-
-bool Ndb_binlog_thread::handle_purge(const char *filename) {
-  if (is_server_started()) {
-    // The binlog thread currently only handles purge requests
-    // that occurs before "server started"
-    return false;
-  }
-
-  // The "server started" state is not yet reached, defer the purge request of
-  // this binlog file to later and handle it just before entering main loop
-  log_verbose(1, "Remember purge binlog file: '%s'", filename);
-  std::lock_guard<std::mutex> lock_pending_purges(m_purge_mutex);
-  m_pending_purges.push_back(filename);
-  return true;
-}
-
-void Ndb_binlog_thread::recall_pending_purges(THD *thd) {
-  std::lock_guard<std::mutex> lock_pending_purges(m_purge_mutex);
-
-  // Iterate list of pending purges and delete corresponding
-  // rows from ndb_binlog_index table
-  for (const std::string &filename : m_pending_purges) {
-    log_verbose(1, "Purging binlog file: '%s'", filename.c_str());
-
-    if (Ndb_binlog_index_table_util::remove_rows_for_file(thd,
-                                                          filename.c_str())) {
-      log_warning("Failed to purge binlog file: '%s'", filename.c_str());
-    }
-  }
-  // All pending purges performed, clear the list
-  m_pending_purges.clear();
+  inject_incident_message(inj, thd, msg);
 }
 
 /*
@@ -7176,7 +7174,7 @@ void Ndb_binlog_thread::commit_trans(injector_transaction &trans, THD *thd,
   if (m_cache_spill_checker.check_disk_spill(binlog_cache_disk_use)) {
     log_warning(
         "Binary log cache data overflowed to disk %u time(s). "
-        "Consider increasing --binlog-cache-size.",
+        "Consider increasing --ndb-log-cache-size.",
         m_cache_spill_checker.m_disk_spills);
   }
 
@@ -7194,47 +7192,60 @@ void Ndb_binlog_thread::inject_table_map(injector_transaction &trans,
                                          Ndb *ndb) const {
   DBUG_TRACE;
   Uint32 iter = 0;
-  const NdbEventOperation *gci_op;
-  Uint32 event_types;
-  Uint32 cumulative_any_value;
-  while ((gci_op = ndb->getNextEventOpInEpoch3(
-              &iter, &event_types, &cumulative_any_value)) != nullptr) {
-    const Ndb_event_data *const event_data =
-        Ndb_event_data::get_event_data(gci_op->getCustomData());
+  const NdbEventOperation *gci_op = nullptr;
+  Uint32 event_types = 0;
+  Uint32 unused_param = 0;  // used as buffer
+  Uint32 any_value = 0;
+  while ((gci_op = ndb->getNextEventOpInEpoch4(&iter, event_types, unused_param,
+                                               any_value)) != nullptr) {
+    if ((event_types &
+         (NdbDictionary::Event::TE_INSERT | NdbDictionary::Event::TE_UPDATE |
+          NdbDictionary::Event::TE_DELETE)) == 0) {
+      DBUG_PRINT("info", ("Skipping non data event"));
+      continue;
+    }
 
     if ((event_types & ~NdbDictionary::Event::TE_STOP) == 0) {
-      // workaround for interface returning TE_STOP events
+      // Workaround for interface returning TE_STOP events
       // which are normally filtered out in the nextEvent loop
       DBUG_PRINT("info", ("Skipped TE_STOP on table %s",
                           gci_op->getEvent()->getTable()->getName()));
       continue;
     }
 
+    const Ndb_event_data *const event_data =
+        Ndb_event_data::get_event_data(gci_op->getCustomData());
     const NDB_SHARE *const share = event_data->share;
     if (share == m_apply_status_share) {
       // skip this table, it is handled specially
       continue;
     }
 
-    TABLE *const table = event_data->shadow_table;
-    if ((event_types &
-         (NdbDictionary::Event::TE_INSERT | NdbDictionary::Event::TE_UPDATE |
-          NdbDictionary::Event::TE_DELETE)) == 0) {
-      DBUG_PRINT("info", ("Skipping non data event, table: %s",
-                          table->s->table_name.str));
-      continue;
-    }
+    DBUG_PRINT("info", ("Filtered any_value: %u", any_value));
 
-    if (ndbcluster_anyvalue_is_reserved(cumulative_any_value) &&
-        ndbcluster_anyvalue_is_nologging(cumulative_any_value)) {
-      // All events for this table in this epoch are marked as
-      // nologging, therefore we do not include the table in the epoch
-      // transaction.
+    if (AnyValueFilter::is_only_nologging(any_value)) {
+      // At least one row change asked for "no logging" and no other row change
+      // wanted logging. This means that all changes are marked as nologging and
+      // therefore the table is skipped.
       DBUG_PRINT("info",
-                 ("Skip binlogging, table: %s", table->s->table_name.str));
+                 ("Skip, nologging detected and no-one requested logging"));
       continue;
     }
 
+    if (!opt_log_replica_updates) {
+      // This server should not log row changes that only contain changes from
+      // replicas. Thus if there is a row change from at least one node
+      // which is not a replica it should be logged. Otherwise, it is skipped.
+      if (AnyValueFilter::is_only_replica_update(any_value)) {
+        // Only row changes from replicas, skip logging of Table_map_log_event
+        // to avoid that an empty Table_map_log_event without row changes appear
+        // in the binlog.
+        DBUG_PRINT("info", ("Skip, all rows are from replica"));
+        continue;
+      }
+    }
+
+    TABLE *const table = event_data->shadow_table;
     DBUG_PRINT("info", ("Use table, name: %s, fields: %u",
                         table->s->table_name.str, table->s->fields));
     injector::transaction::table tbl(table, true);
@@ -7293,7 +7304,6 @@ void Ndb_binlog_thread::do_run() {
 
   log_info("Started");
 
-  Ndb_binlog_setup binlog_setup(thd);
   Ndb_schema_dist_data schema_dist_data;
 
 restart_cluster_failure:
@@ -7360,7 +7370,7 @@ restart_cluster_failure:
   }
 
   // Create Thd_ndb after server started
-  if (!(thd_ndb = Thd_ndb::seize(thd))) {
+  if (!(thd_ndb = Thd_ndb::seize(thd, psi_name()))) {
     log_error("Failed to seize Thd_ndb object");
     goto err;
   }
@@ -7371,21 +7381,20 @@ restart_cluster_failure:
   // wait_for_server_started() to ensure that the parts of
   // MySQL Server it uses has been created
   thd->init_query_mem_roots();
+  thd->set_time();
   lex_start(thd);
 
   if (do_reconnect_incident && ndb_binlog_running) {
-    if (check_reconnect_incident(thd, inj, reconnect_incident_id)) {
-      // Incident written, don't report incident again unless Ndb_binlog_thread
-      // is restarted
-      do_reconnect_incident = false;
-    }
+    check_reconnect_incident(thd, inj, reconnect_incident_id);
+    // Don't report incident again unless thread is restarted
+    do_reconnect_incident = false;
   }
   reconnect_incident_id = CLUSTER_DISCONNECT;
 
-  // Handle pending purge requests from before "server started" state
-  recall_pending_purges(thd);
-
   {
+    Ndb_binlog_setup binlog_setup(thd);
+    Ndb_thd_memory_guard binlog_setup_guard(thd);
+
     log_verbose(1, "Wait for cluster to start");
     thd->set_proc_info("Waiting for ndbcluster to start");
 
@@ -7549,7 +7558,7 @@ restart_cluster_failure:
   ndb_binlog_is_ready = true;
   mysql_mutex_unlock(&injector_data_mutex);
 
-  log_verbose(1, "ndb tables writable");
+  log_verbose(1, "NDB tables writable");
   ndb_tdc_close_cached_tables();
 
   thd->reset_db(EMPTY_CSTR);
@@ -7717,7 +7726,6 @@ restart_cluster_failure:
 
     if (unlikely(s_pOp != nullptr && s_pOp->getEpoch() == current_epoch)) {
       thd->set_proc_info("Processing events from schema table");
-      g_ndb_log_replica_updates = opt_log_replica_updates;
       s_ndb->setReportThreshEventGCISlip(
           opt_ndb_report_thresh_binlog_epoch_slip);
       s_ndb->setReportThreshEventFreeMem(
@@ -7846,6 +7854,19 @@ restart_cluster_failure:
     // Synchronize 1 object from the queue of objects detected for automatic
     // synchronization
     synchronize_detected_object(thd);
+
+    // Self test functionality
+    DBUG_EXECUTE_IF("ndb_binlog_log_table_maps",
+                    { dbug_log_table_maps(i_ndb, current_epoch); });
+
+    DBUG_EXECUTE_IF("ndb_binlog_log_multi_server_id",
+                    { dbug_log_multi_server_id(i_ndb, current_epoch); });
+
+    DBUG_EXECUTE_IF("ndb_binlog_inject_incident", {
+      // Test rpl_injector function for writing incident to binlog
+      const std::string message{"Epoch: " + std::to_string(current_epoch)};
+      inj->record_incident(thd, message.c_str());
+    });
   }
 
   // Check if loop has been terminated without properly handling all events
@@ -7881,6 +7902,7 @@ err:
 
   mysql_mutex_lock(&injector_data_mutex);
   ndb_binlog_tables_inited = false;
+  ndb_binlog_is_ready = false;
   mysql_mutex_unlock(&injector_data_mutex);
 
   thd->reset_db(NULL_CSTR);  // as not to try to free memory

@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +32,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <algorithm>
+#include <array>
 #include <iomanip>
 #include <memory>
 #include <new>
@@ -812,17 +814,21 @@ bool Persisted_variables_cache::flush_to_file() {
     /* write to file */
     if (mysql_file_fputs(dest.c_ptr(), m_fd) < 0) {
       ret = true;
+    } else {
+      DBUG_EXECUTE_IF("crash_after_write_persist_file", DBUG_SUICIDE(););
+      /* flush contents to disk immediately */
+      if ((mysql_file_fflush(m_fd) != 0) ||
+          (my_sync(my_fileno(m_fd->m_file), MYF(MY_WME)) == -1))
+        ret = true;
     }
-    DBUG_EXECUTE_IF("crash_after_write_persist_file", DBUG_SUICIDE(););
-    /* flush contents to disk immediately */
-    if (mysql_file_fflush(m_fd) != 0) ret = true;
-    if (my_sync(my_fileno(m_fd->m_file), MYF(MY_WME)) == -1) ret = true;
+    close_persist_file();
   }
-  close_persist_file();
   if (!ret) {
     DBUG_EXECUTE_IF("crash_after_close_persist_file", DBUG_SUICIDE(););
-    my_rename(m_persist_backup_filename.c_str(), m_persist_filename.c_str(),
-              MYF(MY_WME));
+    if (my_rename(m_persist_backup_filename.c_str(), m_persist_filename.c_str(),
+                  MYF(MY_WME)))
+      ret = true;
+    DBUG_EXECUTE_IF("crash_after_rename_persist_file", DBUG_SUICIDE(););
   }
   if (ret == false && do_cleanup == true) clear_sensitive_blob_and_iv();
   mysql_mutex_unlock(&m_LOCK_persist_file);
@@ -896,6 +902,9 @@ void Persisted_variables_cache::set_parse_early_sources() {
 
   for (auto &it : sorted_vars) {
     auto sysvar = intern_find_sys_var(it.key.c_str(), it.key.length());
+    if (sysvar == nullptr) {
+      continue;
+    }
     sysvar->set_source(enum_variable_source::PERSISTED);
 #ifndef NDEBUG
     bool source_truncated =
@@ -1836,6 +1845,37 @@ void Persisted_variables_cache::load_aliases() {
 }
 
 /**
+  Function to recategorize variables based on changes in their properties.
+
+  It is possible that during the course of development, we reclassify
+  certain variables. Such an action may have an impact on when and how
+  the persisted values of such variables are used/applied.
+
+  If such variables are persisted using previous versions of the server
+  binary, it is important that we move them to correct in-memory
+  containers so that,
+  1. Variables will be handled as required during bootstrap
+  2. Upon next change to persisted option file, variables will be
+     placed into appropriate JSON arrays.
+*/
+void Persisted_variables_cache::handle_option_type_change() {
+  std::array<std::string, 1> dynamic_to_parse_early_static = {"ssl_fips_mode"};
+
+  for (auto one : dynamic_to_parse_early_static) {
+    auto find_variable = [&one](st_persist_var const &s) -> bool {
+      return s.key == one;
+    };
+    auto it = std::find_if(m_persisted_dynamic_variables.begin(),
+                           m_persisted_dynamic_variables.end(), find_variable);
+    if (it != m_persisted_dynamic_variables.end()) {
+      st_persist_var variable_info = *it;
+      m_persisted_static_parse_early_variables[one] = variable_info;
+      m_persisted_dynamic_variables.erase(it);
+    }
+  }
+}
+
+/**
   read_persist_file() reads the persisted config file
 
   This function does following:
@@ -1920,14 +1960,17 @@ int Persisted_variables_cache::read_persist_file() {
       break;
   };
 
-  if (!retval) load_aliases();
+  if (!retval) {
+    load_aliases();
+    handle_option_type_change();
+  }
   return retval;
 }
 
 /**
   append_parse_early_variables() does a lookup into persist_variables
-  for read only variables and place them after the command line options with a
-  separator "----persist-args-separator----"
+  for parse early variables and place them after the command line options with
+  a separator "----persist-args-separator----"
 
   This function does nothing when --no-defaults is set or if
   persisted_globals_load is disabled.

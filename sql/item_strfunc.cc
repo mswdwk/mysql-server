@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -421,7 +422,7 @@ class kdf_argument {
       *error_generated = true;
       return false;
     }
-    kdf_option = kdf_option_value->ptr();
+    kdf_option = to_string(*kdf_option_value);
     return true;
   }
 
@@ -775,22 +776,18 @@ bool Item_func_to_base64::resolve_type(THD *thd) {
 
 String *Item_func_to_base64::val_str_ascii(String *str) {
   String *res = args[0]->val_str(str);
-  bool too_long = false;
-  uint64 length;
-  if (!res || res->length() > (uint)base64_encode_max_arg_length() ||
-      (too_long =
-           ((length = base64_needed_encoded_length((uint64)res->length())) >
-            current_thd->variables.max_allowed_packet)) ||
-      tmp_value.alloc((uint)length)) {
-    null_value = true;  // NULL input, too long input, or OOM.
-    if (too_long) {
-      return push_packet_overflow_warning(current_thd, func_name());
-    }
-    return nullptr;
-  }
-  base64_encode(res->ptr(), (int)res->length(), tmp_value.ptr());
+  if (res == nullptr) return error_str();
+  if (res->length() > base64_encode_max_arg_length()) return null_return_str();
+
+  uint64 length = base64_needed_encoded_length(res->length());
+  if (length > current_thd->variables.max_allowed_packet)
+    return push_packet_overflow_warning(current_thd, func_name());
+
+  if (tmp_value.alloc(length)) return error_str();
+
+  base64_encode(res->ptr(), res->length(), tmp_value.ptr());
   assert(length > 0);
-  tmp_value.length((uint)length - 1);  // Without trailing '\0'
+  tmp_value.length(length - 1);  // Without trailing '\0'
   null_value = false;
   return &tmp_value;
 }
@@ -809,26 +806,23 @@ bool Item_func_from_base64::resolve_type(THD *thd) {
 
 String *Item_func_from_base64::val_str(String *str) {
   String *res = args[0]->val_str_ascii(str);
-  bool too_long = false;
-  int64 length;
-  const char *end_ptr;
+  if (res == nullptr) return error_str();
+  if (res->length() > base64_decode_max_arg_length()) return null_return_str();
 
-  if (!res || res->length() > (uint)base64_decode_max_arg_length() ||
-      (too_long = ((uint64)(length = base64_needed_decoded_length(
-                                (uint64)res->length())) >
-                   current_thd->variables.max_allowed_packet)) ||
-      tmp_value.alloc((uint)length) ||
-      (length = base64_decode(res->ptr(), (uint64)res->length(),
-                              tmp_value.ptr(), &end_ptr, 0)) < 0 ||
-      end_ptr < res->ptr() + res->length()) {
-    null_value =
-        true;  // NULL input, too long input, OOM, or badly formed input
-    if (too_long) {
-      return push_packet_overflow_warning(current_thd, func_name());
-    }
-    return nullptr;
+  uint64 length = base64_needed_decoded_length(res->length());
+  if (length > current_thd->variables.max_allowed_packet)
+    return push_packet_overflow_warning(current_thd, func_name());
+
+  if (tmp_value.alloc(length)) return error_str();
+
+  const char *end_ptr;
+  int64 decoded_length =
+      base64_decode(res->ptr(), res->length(), tmp_value.ptr(), &end_ptr, 0);
+  if (decoded_length < 0 || end_ptr < res->ptr() + res->length()) {
+    return null_return_str();
   }
-  tmp_value.length((uint)length);
+
+  tmp_value.length(decoded_length);
   null_value = false;
   return &tmp_value;
 }
@@ -2395,6 +2389,35 @@ void Item_func_make_set::split_sum_func(THD *thd, Ref_item_array ref_item_array,
   Item_str_func::split_sum_func(thd, ref_item_array, fields);
 }
 
+bool Item_func_make_set::fix_fields(THD *thd, Item **ref) {
+  assert(!fixed);
+  if (!item->fixed && item->fix_fields(thd, &item)) {
+    return true;
+  }
+  if (item->check_cols(1)) {
+    return true;
+  }
+  if (Item_func::fix_fields(thd, ref)) {
+    return true;
+  }
+  if (item->is_nullable()) {
+    set_nullable(true);
+  }
+  used_tables_cache |= item->used_tables();
+  if (null_on_null) not_null_tables_cache |= item->not_null_tables();
+  add_accum_properties(item);
+
+  return false;
+}
+
+void Item_func_make_set::fix_after_pullout(Query_block *parent_query_block,
+                                           Query_block *removed_query_block) {
+  Item_func::fix_after_pullout(parent_query_block, removed_query_block);
+  item->fix_after_pullout(parent_query_block, removed_query_block);
+  used_tables_cache |= item->used_tables();
+  if (null_on_null) not_null_tables_cache |= item->not_null_tables();
+}
+
 bool Item_func_make_set::resolve_type(THD *thd) {
   if (item->propagate_type(thd, MYSQL_TYPE_LONGLONG)) return true;
   if (param_type_is_default(thd, 0, -1)) return true;
@@ -2406,9 +2429,6 @@ bool Item_func_make_set::resolve_type(THD *thd) {
   for (uint i = 0; i < arg_count; i++)
     char_length += args[i]->max_char_length();
   set_data_type_string(char_length);
-  used_tables_cache |= item->used_tables();
-  not_null_tables_cache &= item->not_null_tables();
-  add_accum_properties(item);
 
   return false;
 }
@@ -2423,17 +2443,16 @@ void Item_func_make_set::update_used_tables() {
 
 String *Item_func_make_set::val_str(String *str) {
   assert(fixed);
-  ulonglong bits;
   bool first_found = false;
   Item **ptr = args;
-  String *result = nullptr;
   THD *thd = current_thd;
 
-  bits = item->val_int();
+  ulonglong bits = item->val_int();
   if ((null_value = item->null_value)) return nullptr;
 
-  if (arg_count < 64) bits &= ((ulonglong)1 << arg_count) - 1;
+  if (arg_count < 64) bits &= (1ULL << arg_count) - 1;
 
+  tmp_str.set("", 0, collation.collation);
   for (; bits; bits >>= 1, ptr++) {
     if ((bits & 1) == 0) {
       continue;
@@ -2441,36 +2460,22 @@ String *Item_func_make_set::val_str(String *str) {
     String *res = eval_string_arg(collation.collation, *ptr, str);
     if (res == nullptr) {
       if (thd->is_error()) {
-        null_value = true;
-        return nullptr;
+        return error_str();
       }
       continue;  // Skip nulls
     }
 
-    if (!first_found) {  // First argument
-      first_found = true;
-      if (res != str)
-        result = res;  // Use original string
-      else {
-        if (tmp_str.copy(*res))  // Don't use 'str'
-          return make_empty_result();
-        result = &tmp_str;
+    if (first_found) {
+      if (tmp_str.append(STRING_WITH_LEN(","), &my_charset_bin) ||
+          tmp_str.append(*res)) {
+        return make_empty_result();
       }
     } else {
-      if (result != &tmp_str) {  // Copy data to tmp_str
-        if (tmp_str.alloc((result != nullptr ? result->length() : 0) +
-                          res->length() + 1) ||
-            tmp_str.copy(*result))
-          return make_empty_result();
-        result = &tmp_str;
-      }
-      if (tmp_str.append(STRING_WITH_LEN(","), &my_charset_bin) ||
-          tmp_str.append(*res))
-        return make_empty_result();
+      first_found = true;
+      if (tmp_str.copy(*res)) return make_empty_result();
     }
   }
-  if (result == nullptr) return make_empty_result();
-  return result;
+  return &tmp_str;
 }
 
 Item *Item_func_make_set::transform(Item_transformer transformer, uchar *arg) {
@@ -3292,14 +3297,12 @@ String *Item_func_weight_string::val_str(String *str) {
     explicitly, otherwise calculate result length
     from argument and "num_codepoints".
   */
-  output_buf_size =
-      m_field_ref != nullptr
-          ? m_field_ref->field->pack_length()
-          : result_length > 0
-                ? result_length
-                : cs->coll->strnxfrmlen(
-                      cs, cs->mbmaxlen *
-                              max<size_t>(input->length(), num_codepoints));
+  output_buf_size = m_field_ref != nullptr ? m_field_ref->field->pack_length()
+                    : result_length > 0
+                        ? result_length
+                        : cs->coll->strnxfrmlen(
+                              cs, cs->mbmaxlen * max<size_t>(input->length(),
+                                                             num_codepoints));
 
   /*
     my_strnxfrm() with an odd number of bytes is illegal for some collations;
@@ -3826,6 +3829,8 @@ bool Item_func_quote::resolve_type(THD *thd) {
   ulonglong max_result_length = max<ulonglong>(
       4, static_cast<ulonglong>(args[0]->max_char_length()) * 2U + 2U);
   collation.set(args[0]->collation);
+  if (collation.collation == &my_charset_bin)
+    collation.set(thd->variables.collation_connection);
   set_data_type_string(max_result_length);
   set_nullable(is_nullable() || max_length > thd->variables.max_allowed_packet);
   return false;
@@ -3866,8 +3871,8 @@ String *Item_func_quote::val_str(String *str) {
 
   char *to;
   const char *from, *end, *start;
-  String *arg = args[0]->val_str(str);
-  size_t arg_length, new_length;
+  String *arg = eval_string_arg(collation.collation, args[0], str);
+  if (current_thd->is_error()) return error_str();
   if (!arg)  // Null argument
   {
     /* Return the string 'NULL' */
@@ -3876,37 +3881,47 @@ String *Item_func_quote::val_str(String *str) {
     return str;
   }
 
-  arg_length = arg->length();
+  size_t new_length;
+  size_t arg_length = arg->length();
 
   if (collation.collation->mbmaxlen == 1) {
     new_length = arg_length + 2; /* for beginning and ending ' signs */
     for (from = arg->ptr(), end = from + arg_length; from < end; from++)
-      new_length += get_esc_bit(escmask, (uchar)*from);
+      new_length += get_esc_bit(escmask, static_cast<uchar>(*from));
   } else {
     new_length = (arg_length * 2) + /* For string characters */
                  (2 * collation.collation->mbmaxlen); /* For quotes */
   }
 
-  if (tmp_value.alloc(new_length)) goto null;
+  if (tmp_value.alloc(new_length)) return error_str();
 
   if (collation.collation->mbmaxlen > 1) {
     const CHARSET_INFO *cs = collation.collation;
-    int mblen;
-    uchar *to_end;
     to = tmp_value.ptr();
-    to_end = (uchar *)to + new_length;
+    uchar *to_end = pointer_cast<uchar *>(to) + new_length;
 
     /* Put leading quote */
-    if ((mblen = cs->cset->wc_mb(cs, '\'', (uchar *)to, to_end)) <= 0)
-      goto null;
+    int mblen = cs->cset->wc_mb(cs, '\'', pointer_cast<uchar *>(to), to_end);
+    if (mblen <= 0) {
+      my_error(ER_INTERNAL_ERROR, MYF(0), func_name());
+      return make_empty_result();
+    }
     to += mblen;
 
     for (start = arg->ptr(), end = start + arg_length; start < end;) {
       my_wc_t wc;
       bool escape;
-      if ((mblen = cs->cset->mb_wc(cs, &wc, pointer_cast<const uchar *>(start),
-                                   pointer_cast<const uchar *>(end))) <= 0)
-        goto null;
+      mblen = cs->cset->mb_wc(cs, &wc, pointer_cast<const uchar *>(start),
+                              pointer_cast<const uchar *>(end));
+      if (mblen <= 0) {
+        // See e.g. my_mb_wc_euc_jp() which has special handling of valid,
+        // but un-assigned characters.
+        if ((mblen == -2 || mblen == -3)) {
+          mblen = -mblen;
+          wc = '?';
+        } else
+          return make_empty_result(); /* EOL or invalid byte sequence */
+      }
       start += mblen;
       switch (wc) {
         case 0:
@@ -3928,18 +3943,27 @@ String *Item_func_quote::val_str(String *str) {
           break;
       }
       if (escape) {
-        if ((mblen = cs->cset->wc_mb(cs, '\\', (uchar *)to, to_end)) <= 0)
-          goto null;
+        mblen = cs->cset->wc_mb(cs, '\\', pointer_cast<uchar *>(to), to_end);
+        if (mblen <= 0) {
+          my_error(ER_INTERNAL_ERROR, MYF(0), func_name());
+          return make_empty_result();
+        }
         to += mblen;
       }
-      if ((mblen = cs->cset->wc_mb(cs, wc, (uchar *)to, to_end)) <= 0)
-        goto null;
+      mblen = cs->cset->wc_mb(cs, wc, pointer_cast<uchar *>(to), to_end);
+      if (mblen <= 0) {
+        my_error(ER_INTERNAL_ERROR, MYF(0), func_name());
+        return make_empty_result();
+      }
       to += mblen;
     }
 
     /* Put trailing quote */
-    if ((mblen = cs->cset->wc_mb(cs, '\'', (uchar *)to, to_end)) <= 0)
-      goto null;
+    mblen = cs->cset->wc_mb(cs, '\'', pointer_cast<uchar *>(to), to_end);
+    if (mblen <= 0) {
+      my_error(ER_INTERNAL_ERROR, MYF(0), func_name());
+      return make_empty_result();
+    }
     to += mblen;
     new_length = to - tmp_value.ptr();
     goto ret;
@@ -3985,10 +4009,6 @@ ret:
   tmp_value.set_charset(collation.collation);
   null_value = false;
   return &tmp_value;
-
-null:
-  null_value = true;
-  return nullptr;
 }
 
 /**
@@ -4141,11 +4161,10 @@ String *Item_func_uncompress::val_str(String *str) {
                                : ((err == Z_MEM_ERROR) ? ER_ZLIB_Z_MEM_ERROR
                                                        : ER_ZLIB_Z_DATA_ERROR));
   push_warning(current_thd, Sql_condition::SL_WARNING, code,
-               err == Z_BUF_ERROR
-                   ? ER_THD(current_thd, ER_ZLIB_Z_BUF_ERROR)
-                   : (err == Z_MEM_ERROR)
-                         ? ER_THD(current_thd, ER_ZLIB_Z_MEM_ERROR)
-                         : ER_THD(current_thd, ER_ZLIB_Z_DATA_ERROR));
+               err == Z_BUF_ERROR ? ER_THD(current_thd, ER_ZLIB_Z_BUF_ERROR)
+               : (err == Z_MEM_ERROR)
+                   ? ER_THD(current_thd, ER_ZLIB_Z_MEM_ERROR)
+                   : ER_THD(current_thd, ER_ZLIB_Z_DATA_ERROR));
 
 err:
   null_value = true;

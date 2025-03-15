@@ -1,18 +1,19 @@
 #ifndef RPL_SOURCE_H_INCLUDED
 #define RPL_SOURCE_H_INCLUDED
 
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,9 +30,10 @@
 #include "libbinlogevents/include/uuid.h"  // UUID
 #include "my_hostname.h"                   // HOSTNAME_LENGTH
 #include "my_inttypes.h"
-#include "my_thread_local.h"  // my_thread_id
-#include "mysql_com.h"        // USERNAME_LENGTH
-#include "sql/sql_const.h"    // MAX_PASSWORD_LENGTH
+#include "my_thread_local.h"       // my_thread_id
+#include "mysql_com.h"             // USERNAME_LENGTH
+#include "sql/resource_blocker.h"  // resource_blocker::User and Resource
+#include "sql/sql_const.h"         // MAX_PASSWORD_LENGTH
 
 class Gtid_set;
 class String;
@@ -41,6 +43,9 @@ extern bool server_id_supplied;
 extern int max_binlog_dump_events;
 extern bool opt_sporadic_binlog_dump_fail;
 extern bool opt_show_replica_auth_info;
+
+// Returns the rpl_resource
+resource_blocker::Resource &get_dump_thread_resource();
 
 struct REPLICA_INFO {
   uint32 server_id;

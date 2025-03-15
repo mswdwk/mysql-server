@@ -1,15 +1,16 @@
-# Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -181,12 +182,19 @@ IF(FREEBSD)
   ADD_COMPILE_FLAGS(stacktrace.cc COMPILE_FLAGS ${LIBUNWIND_CFLAGS})
 ENDIF()
 
+IF(WITH_EXT_BACKTRACE)
+  SET(BACKTRACE_LIBRARIES ext::backtrace)
+ELSE()
+  UNSET(BACKTRACE_LIBRARIES)
+ENDIF()
+
 ADD_CONVENIENCE_LIBRARY(mysys ${MYSYS_SOURCES}
   LINK_LIBRARIES
   mytime
   strings
   ext::zlib
   ext::zstd
+  ${BACKTRACE_LIBRARIES}
   ${LIBNSL}
   ${LIBM}
   ${LIBRT}
@@ -239,9 +247,9 @@ IF(HAVE_BUILD_ID_SUPPORT)
   # Verify that we can read our own build-id:
   ADD_CUSTOM_COMMAND(TARGET build_id_test POST_BUILD
 #   COMMAND ./build_id_test
-#   COMMAND ${READELF_EXECUTABLE} -n ./build_id_test | grep "Build ID:"
+#   COMMAND LANG=C ${READELF_EXECUTABLE} -n ./build_id_test | grep "Build ID:"
     COMMAND ./build_id_test      | egrep -o "[0-9a-f]{40}" > build_id_test_1
-    COMMAND ${READELF_EXECUTABLE} -n ./build_id_test | grep "Build ID:" |
+    COMMAND LANG=C ${READELF_EXECUTABLE} -n ./build_id_test | grep "Build ID:" |
                                    egrep -o "[0-9a-f]{40}" > build_id_test_2
     COMMAND diff build_id_test_1 build_id_test_2
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/runtime_output_directory

@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@
 
 #include <assert.h>
 #include <mysql/group_replication_priv.h>
+#include <atomic>
 #include <list>
 #include <map>
 #include <string>
@@ -55,7 +57,11 @@ class Gtid_set_ref : public Gtid_set {
   Gtid_set_ref(Sid_map *sid_map, int64 parallel_applier_sequence_number)
       : Gtid_set(sid_map),
         reference_counter(0),
-        parallel_applier_sequence_number(parallel_applier_sequence_number) {}
+        parallel_applier_sequence_number(parallel_applier_sequence_number),
+        garbage_collect_counter(0) {
+    DBUG_EXECUTE_IF("group_replication_ci_rows_counter_high",
+                    { garbage_collect_counter = 1000; });
+  }
 
   virtual ~Gtid_set_ref() = default;
 
@@ -76,6 +82,22 @@ class Gtid_set_ref : public Gtid_set {
     return --reference_counter;
   }
 
+  /**
+    Set garbage collector counter when Gtid_set_ref was checked is subset no
+    equals of gtid_stable_set
+  */
+  void set_garbage_collect_counter(uint64 ver) {
+    garbage_collect_counter = ver;
+  }
+
+  /**
+    Get garbage collector counter when Gtid_set_ref was checked is subset no
+    equals of gtid_stable_set
+
+    @return garbage collect counter
+  */
+  uint64 get_garbage_collect_counter() { return garbage_collect_counter; }
+
   int64 get_parallel_applier_sequence_number() const {
     return parallel_applier_sequence_number;
   }
@@ -83,6 +105,7 @@ class Gtid_set_ref : public Gtid_set {
  private:
   size_t reference_counter;
   int64 parallel_applier_sequence_number;
+  uint64 garbage_collect_counter;
 };
 
 /**
@@ -423,7 +446,7 @@ class Certifier : public Certifier_interface {
   /**
     Is certifier initialized.
   */
-  bool initialized;
+  std::atomic<bool> initialized{false};
 
   /**
     Variable to store the sidno used for transactions which will be logged
@@ -475,6 +498,11 @@ class Certifier : public Certifier_interface {
                       If true parallel_applier_last_committed_global
                       is updated to the current sequence number
                       (before update sequence number).
+    @param[in] increment_parallel_applier_sequence_number
+                      If false (during certification garbage collection)
+                      parallel_applier_last_committed_global is set to
+                      parallel_applier_last_sequence_number and
+                      parallel_applier_last_sequence_number is not updated
 
     Note: parallel_applier_last_committed_global should be updated
           on the following situations:
@@ -485,8 +513,9 @@ class Certifier : public Certifier_interface {
              do not know what write sets were purged, which may cause
              transactions last committed to be incorrectly computed.
   */
-  void increment_parallel_applier_sequence_number(
-      bool update_parallel_applier_last_committed_global);
+  void update_parallel_applier_indexes(
+      bool update_parallel_applier_last_committed_global,
+      bool increment_parallel_applier_sequence_number);
 
   /**
     Internal method to add the given gtid gno in the group_gtid_executed set.
@@ -577,6 +606,7 @@ class Certifier : public Certifier_interface {
   ulonglong positive_cert;
   ulonglong negative_cert;
   int64 parallel_applier_last_committed_global;
+  int64 parallel_applier_last_sequence_number;
   int64 parallel_applier_sequence_number;
 
 #if !defined(NDEBUG)
@@ -731,6 +761,9 @@ class Certifier : public Certifier_interface {
     certified transaction on a particular group member.
   */
   void update_certified_transaction_count(bool result, bool local_transaction);
+
+  /* Number of garbage collector run */
+  uint64 garbage_collect_runs{1};
 };
 
 /*

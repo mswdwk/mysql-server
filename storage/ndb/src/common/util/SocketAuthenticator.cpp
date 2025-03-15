@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2004, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2004, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,71 +24,50 @@
 */
 
 #include <ndb_global.h>
-#include <SocketAuthenticator.hpp>
 #include <InputStream.hpp>
 #include <OutputStream.hpp>
-SocketAuthSimple::SocketAuthSimple(const char *username, const char *passwd) {
-  if (username)
-    m_username= strdup(username);
-  else
-    m_username= nullptr;
-  if (passwd)
-    m_passwd= strdup(passwd);
-  else
-    m_passwd= nullptr;
+#include <SocketAuthenticator.hpp>
+
+const char *SocketAuthenticator::error(int result) {
+  return (result < AuthOk) ? "Socket Auth failure" : "Success";
 }
 
-SocketAuthSimple::~SocketAuthSimple()
-{
-  if (m_passwd)
-    free(m_passwd);
-  if (m_username)
-    free(m_username);
-}
-
-bool SocketAuthSimple::client_authenticate(NdbSocket & sockfd)
-{
-  SecureSocketOutputStream s_output(sockfd);
-  SecureSocketInputStream  s_input(sockfd);
+int SocketAuthSimple::client_authenticate(const NdbSocket &sockfd) {
+  SocketOutputStream s_output(sockfd);
+  SocketInputStream s_input(sockfd);
 
   // Write username and password
-  s_output.println("%s", m_username ? m_username : "");
-  s_output.println("%s", m_passwd ? m_passwd : "");
+  s_output.println("ndbd");
+  s_output.println("ndbd passwd");
 
   char buf[16];
 
   // Read authentication result
-  if (s_input.gets(buf, sizeof(buf)) == nullptr)
-    return false;
-  buf[sizeof(buf)-1]= 0;
+  if (s_input.gets(buf, sizeof(buf)) == nullptr) return -1;
+  buf[sizeof(buf) - 1] = 0;
 
   // Verify authentication result
-  if (strncmp("ok", buf, 2) == 0)
-    return true;
+  if (strncmp("ok", buf, 2) == 0) return 0;
 
-  return false;
+  return -1;
 }
 
-bool SocketAuthSimple::server_authenticate(NdbSocket & sockfd)
-{
-  SecureSocketOutputStream s_output(sockfd);
-  SecureSocketInputStream  s_input(sockfd);
+int SocketAuthSimple::server_authenticate(const NdbSocket &sockfd) {
+  SocketOutputStream s_output(sockfd);
+  SocketInputStream s_input(sockfd);
 
   char buf[256];
 
   // Read username
-  if (s_input.gets(buf, sizeof(buf)) == nullptr)
-    return false;
-  buf[sizeof(buf)-1]= 0;
+  if (s_input.gets(buf, sizeof(buf)) == nullptr) return -1;
+  buf[sizeof(buf) - 1] = 0;
 
   // Read password
-  if (s_input.gets(buf, sizeof(buf)) == nullptr)
-    return false;
-  buf[sizeof(buf)-1]= 0;
+  if (s_input.gets(buf, sizeof(buf)) == nullptr) return -1;
+  buf[sizeof(buf) - 1] = 0;
 
   // Write authentication result
   s_output.println("ok");
 
-  return true;
+  return AuthOk;
 }
-

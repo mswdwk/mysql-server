@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -218,6 +219,15 @@ static void check_deprecated_variables() {
     option_deprecation_warning(thd, "group_replication_ip_whitelist",
                                "group_replication_ip_allowlist");
   }
+  if (ov.recovery_completion_policy_var != RECOVERY_POLICY_WAIT_EXECUTED) {
+    push_deprecated_warn_no_replacement(
+        thd, "group_replication_recovery_complete_at");
+  }
+  if (ov.view_change_uuid_var != nullptr &&
+      strcmp(ov.view_change_uuid_var, "AUTOMATIC")) {
+    push_deprecated_warn_no_replacement(thd,
+                                        "group_replication_view_change_uuid");
+  }
 }
 
 static const char *get_ip_allowlist() {
@@ -230,9 +240,9 @@ static const char *get_ip_allowlist() {
 
   return allowlist.compare("automatic")
              ? ov.ip_allowlist_var  // ip_allowlist_var is set
-             : whitelist.compare("automatic")
-                   ? ov.ip_whitelist_var   // ip_whitelist_var is set
-                   : ov.ip_allowlist_var;  // both are not set
+         : whitelist.compare("automatic")
+             ? ov.ip_whitelist_var   // ip_whitelist_var is set
+             : ov.ip_allowlist_var;  // both are not set
 }
 /*
   Auxiliary public functions.
@@ -939,6 +949,10 @@ int configure_group_member_manager() {
                   { local_version = 0x080015; };);
   DBUG_EXECUTE_IF("group_replication_version_8_0_28",
                   { local_version = 0x080028; };);
+  DBUG_EXECUTE_IF("group_replication_version_8_0_35",
+                  { local_version = 0x080035; };);
+  DBUG_EXECUTE_IF("group_replication_version_clone_not_supported",
+                  { local_version = 0x080036; };);
   Member_version local_member_plugin_version(local_version);
   DBUG_EXECUTE_IF("group_replication_force_member_uuid", {
     uuid = const_cast<char *>("cccccccc-cccc-cccc-cccc-cccccccccccc");
@@ -1068,6 +1082,10 @@ int configure_compatibility_manager() {
   DBUG_EXECUTE_IF("group_replication_legacy_election_version2", {
     Member_version higher_version(0x080015);
     compatibility_mgr->set_local_version(higher_version);
+  };);
+  DBUG_EXECUTE_IF("group_replication_version_8_0_35", {
+    Member_version version(0x080035);
+    compatibility_mgr->set_local_version(version);
   };);
 
   return 0;
@@ -3094,9 +3112,9 @@ static int check_flow_control_min_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_min_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3112,9 +3130,9 @@ static int check_flow_control_min_recovery_quota(MYSQL_THD, SYS_VAR *,
   if (check_flow_control_min_recovery_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
   return 0;
 }
 
@@ -3128,9 +3146,9 @@ static int check_flow_control_max_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_max_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3154,11 +3172,10 @@ static int check_sysvar_ulong_timeout(MYSQL_THD, SYS_VAR *var, void *save,
   longlong in_val;
   value->val_int(value, &in_val);
 
-  *(longlong *)save = (in_val < minimum)
-                          ? minimum
-                          : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
-                                ? in_val
-                                : LONG_TIMEOUT;
+  *(longlong *)save = (in_val < minimum) ? minimum
+                      : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
+                          ? in_val
+                          : LONG_TIMEOUT;
 
   return 0;
 }
@@ -3356,7 +3373,8 @@ static void update_ssl_server_cert_verification(MYSQL_THD, SYS_VAR *,
 }
 
 // Recovery threshold update method
-static int check_recovery_completion_policy(MYSQL_THD, SYS_VAR *, void *save,
+static int check_recovery_completion_policy(MYSQL_THD thd, SYS_VAR *,
+                                            void *save,
                                             struct st_mysql_value *value) {
   DBUG_TRACE;
 
@@ -3366,6 +3384,9 @@ static int check_recovery_completion_policy(MYSQL_THD, SYS_VAR *, void *save,
   long long tmp;
   long result;
   int length;
+
+  push_deprecated_warn_no_replacement(thd,
+                                      "group_replication_recovery_complete_at");
 
   Checkable_rwlock::Guard g(*lv.plugin_running_lock,
                             Checkable_rwlock::TRY_READ_LOCK);
@@ -3938,10 +3959,9 @@ static int check_member_weight(MYSQL_THD, SYS_VAR *, void *save,
     }
   }
 
-  *(uint *)save =
-      (in_val < MIN_MEMBER_WEIGHT)
-          ? MIN_MEMBER_WEIGHT
-          : (in_val < MAX_MEMBER_WEIGHT) ? in_val : MAX_MEMBER_WEIGHT;
+  *(uint *)save = (in_val < MIN_MEMBER_WEIGHT)   ? MIN_MEMBER_WEIGHT
+                  : (in_val < MAX_MEMBER_WEIGHT) ? in_val
+                                                 : MAX_MEMBER_WEIGHT;
 
   return 0;
 }
@@ -5172,6 +5192,9 @@ static int check_view_change_uuid(MYSQL_THD thd, SYS_VAR *, void *save,
 
   char buff[NAME_CHAR_LEN];
   const char *str;
+
+  push_deprecated_warn_no_replacement(thd,
+                                      "group_replication_view_change_uuid");
 
   Checkable_rwlock::Guard g(*lv.plugin_running_lock,
                             Checkable_rwlock::TRY_READ_LOCK);
